@@ -1,0 +1,61 @@
+<vbox xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul"
+      xmlns:html="http://www.w3.org/1999/xhtml"
+      id="zotero-agent-mcp-prefs-root"
+      style="max-width: 760px;">
+
+  <groupbox>
+    <description>让本地 AI agent（ZCode / Claude / Cursor / 脚本）读写 Zotero：内置 HTTP API + MCP 桥。所有功能默认开放，令牌鉴权 + 审计日志保障安全。</description>
+    <checkbox id="ab-enabled" label="启用 Zotero-Agent-MCP 服务（http://127.0.0.1:23119/zotero-agent-mcp/）"/>
+    <separator/>
+    <hbox align="center">
+      <label value="访问令牌" style="width: 70px;"/>
+      <html:input id="ab-token" type="text" readonly="readonly"
+                  style="flex: 1; font-family: monospace; font-size: 11px;"/>
+      <button id="ab-regen" label="重新生成"/>
+      <button id="ab-copy-token" label="复制令牌"/>
+    </hbox>
+    <description>请求时携带请求头：Authorization: Bearer &lt;令牌&gt;（或 X-Agent-Token: &lt;令牌&gt;）。</description>
+  </groupbox>
+
+  <groupbox>
+    <label><html:h2 style="font-size: 1.05em; margin: 0;">功能开关（默认全部开放，可按需关闭）</html:h2></label>
+    <checkbox id="ab-scope-read" label="read — 条目元数据 / 集合 / 搜索 / 最近条目"/>
+    <checkbox id="ab-scope-fulltext" label="fulltext — PDF / EPUB / 文本附件全文"/>
+    <checkbox id="ab-scope-annotations" label="annotations — 高亮与批注"/>
+    <checkbox id="ab-scope-export" label="export — 引文输出（APA / BibTeX 等参考文献）"/>
+    <checkbox id="ab-scope-write" label="write — 新增子笔记、增删标签、本地文档建条目"/>
+    <checkbox id="ab-scope-files" label="files — 下载附件原文件（base64）"/>
+    <separator/>
+    <hbox align="center">
+      <label value="允许的库（逗号分隔 libraryID，留空 = 全部）" style="width: 280px;"/>
+      <html:input id="ab-libs" type="text" style="flex: 1;"/>
+    </hbox>
+    <hbox align="center">
+      <label value="速率限制（请求 / 分钟，0 = 不限）" style="width: 280px;"/>
+      <html:input id="ab-rate" type="number" min="0" max="100000" style="width: 90px;"/>
+    </hbox>
+  </groupbox>
+
+  <groupbox>
+    <label><html:h2 style="font-size: 1.05em; margin: 0;">接入 AI agent</html:h2></label>
+    <description>桥接脚本与现成 MCP 配置已释放到数据目录 zotero-agent-mcp/ 子目录。</description>
+    <hbox>
+      <button id="ab-copy-mcp" label="复制 MCP 配置 JSON（ZCode / Claude / Cursor）"/>
+      <button id="ab-copy-curl" label="复制 curl 示例"/>
+    </hbox>
+    <hbox>
+      <button id="ab-open-bridge" label="打开桥接文件目录"/>
+      <description id="ab-bridge-status" style="color: gray;">…</description>
+    </hbox>
+  </groupbox>
+
+  <groupbox>
+    <label><html:h2 style="font-size: 1.05em; margin: 0;">审计与隐私</html:h2></label>
+    <checkbox id="ab-audit" label="记录访问审计日志（zotero-agent-mcp-audit.jsonl，推荐开启）"/>
+    <hbox>
+      <button id="ab-open-audit" label="查看审计日志"/>
+      <description id="ab-audit-info" style="color: gray;">…</description>
+    </hbox>
+  </groupbox>
+
+</vbox>
