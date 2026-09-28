@@ -914,8 +914,8 @@ var AgentMCP = new function () {
   };
 
   // Create a new item from a local file and (optionally) file it into collections.
-  // POST JSON: {path, title?, itemType?, collections?[], tags?[], mode? 'import'|'link',
-  //             parentKey?, library?, recognize?}
+  // POST JSON: {path, title?, itemType?, fields?, creators?, collections?[], tags?[],
+  //             mode? 'import'|'link', parentKey?, library?, recognize?}
   async function resolveCollectionKeyOrName(libraryID, s) {
     let cols = Zotero.Collections.getByLibrary(libraryID);
     let c = cols.find((x) => !x.deleted && (x.key === s || x.name === s));
@@ -927,12 +927,20 @@ var AgentMCP = new function () {
 
   const hCreateItem = async (ctx) => {
     if (ctx.method !== "POST") {
-      throw new ABError(400, "bad_request", "POST JSON {path, title?, itemType?, collections?, tags?, mode?, parentKey?, library?, recognize?}");
+      throw new ABError(400, "bad_request", "POST JSON {path, title?, itemType?, fields?, creators?, collections?, tags?, mode?, parentKey?, library?, recognize?}");
     }
     let data = ctx.data || {};
     let path = String(data.path || "").trim();
     if (!path) throw new ABError(400, "bad_request", "'path' (absolute local file path) is required");
-    let file = Zotero.File.pathToFile(path);
+    // Windows: newer Gecko rejects forward slashes in initWithPath, and drive-less
+    // paths throw — agents naturally emit forward-slash paths, so normalize first.
+    if (Zotero.isWin) path = path.replace(/\//g, "\\");
+    let file;
+    try {
+      file = Zotero.File.pathToFile(path);
+    } catch (e) {
+      throw new ABError(404, "file_not_found", `File not found: ${path}`);
+    }
     if (!file.exists()) {
       throw new ABError(404, "file_not_found", `File not found: ${path}`);
     }
@@ -947,6 +955,7 @@ var AgentMCP = new function () {
     let fileName = file.leafName;
     let parent = null;
     let item = null;
+    let skippedFields = [];
     if (data.parentKey) {
       parent = await findItem(libraryID, data.parentKey);
       if (!parent.isRegularItem()) {
@@ -961,6 +970,34 @@ var AgentMCP = new function () {
       item = new Zotero.Item(itemType);
       item.libraryID = libraryID;
       item.setField("title", String(data.title || fileName.replace(/\.[^.]+$/, "")));
+      // Optional full metadata: `fields` maps Zotero field names to values (date, publicationTitle,
+      // abstractNote, DOI, …); invalid/inapplicable field names are skipped, not fatal.
+      if (data.fields && typeof data.fields === "object" && !Array.isArray(data.fields)) {
+        for (let [fieldName, value] of Object.entries(data.fields)) {
+          if (fieldName === "title" || value === undefined || value === null || value === "") continue;
+          try {
+            item.setField(String(fieldName), String(value));
+          } catch (e) {
+            skippedFields.push(String(fieldName));
+          }
+        }
+      }
+      // `creators` accepts Zotero creator JSON: {creatorType?, name} for single-field names
+      // (common for Chinese authors) or {creatorType?, firstName, lastName}.
+      if (Array.isArray(data.creators)) {
+        let creators = [];
+        for (let c of data.creators.slice(0, 200)) {
+          if (!c || typeof c !== "object") continue;
+          let creatorType = String(c.creatorType || "author");
+          if (!Zotero.CreatorTypes.getID(creatorType)) creatorType = "author";
+          if (c.name) {
+            creators.push({ creatorType, name: String(c.name), fieldMode: 1 });
+          } else if (c.lastName || c.firstName) {
+            creators.push({ creatorType, lastName: String(c.lastName || ""), firstName: String(c.firstName || ""), fieldMode: 0 });
+          }
+        }
+        if (creators.length) item.setCreators(creators);
+      }
       if (Array.isArray(data.tags)) {
         for (let t of data.tags.slice(0, 50)) {
           let tag = String(t || "").trim();
@@ -1010,6 +1047,7 @@ var AgentMCP = new function () {
       itemKey: item ? item.key : parent.key,
       itemTitle: item ? item.getField("title") : parent.getField("title"),
       attachmentKey: att.key,
+      skippedFields,
       libraryID,
     };
   };

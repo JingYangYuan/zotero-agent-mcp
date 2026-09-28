@@ -14,7 +14,7 @@ import readline from "node:readline";
 
 const BASE_URL = (process.env.ZOTERO_AGENT_URL || "http://127.0.0.1:23119/zotero-agent-mcp").replace(/\/+$/, "");
 const TOKEN = process.env.ZOTERO_AGENT_TOKEN || "";
-const VERSION = "0.2.0";
+const VERSION = "0.4.0";
 
 function log(msg) {
   process.stderr.write(`[zotero-agent-mcp] ${msg}\n`);
@@ -186,13 +186,15 @@ const TOOLS = [
   {
     name: "zotero_add_item",
     description:
-      "Create a new Zotero item from a LOCAL file (PDF/EPUB/DOCX/TXT/…) and attach the file, optionally filing it into collections and running Zotero's automatic metadata recognition. mode='import' copies the file into Zotero storage (default); mode='link' references the original path. If parentKey is given, attaches to that existing item instead of creating a new one.",
+      "Create a new Zotero item from a LOCAL file (PDF/EPUB/DOCX/TXT/…) and attach the file, optionally setting full bibliographic metadata (fields map + creators), filing it into collections and running Zotero's automatic metadata recognition. mode='import' copies the file into Zotero storage (default); mode='link' references the original path. If parentKey is given, attaches to that existing item instead of creating a new one.",
     inputSchema: {
       type: "object",
       properties: {
         path: str("Absolute local file path, e.g. /Users/me/papers/foo.pdf"),
         title: str("Item title (defaults to the file name without extension)"),
         item_type: str("Zotero item type, default 'document'; e.g. journalArticle, book, report, thesis"),
+        fields: { type: "object", additionalProperties: { type: "string" }, description: "Zotero field names to values, e.g. {date:'2020', publicationTitle:'社会学研究', abstractNote:'…', DOI:'…', volume, issue, pages, extra}" },
+        creators: { type: "array", items: { type: "object", additionalProperties: true }, description: "Zotero creators, e.g. [{name:'张成刚', creatorType:'author'}] or [{firstName:'Alex J', lastName:'Wood', creatorType:'author'}]" },
         collections: { type: "array", items: { type: "string" }, description: "Collection keys or exact collection names to file the item into" },
         tags: { type: "array", items: { type: "string" }, description: "Tags to add to the new item" },
         mode: str("'import' (default, copy file) or 'link' (attach original path)"),
@@ -281,6 +283,8 @@ async function callTool(name, args) {
           path: args.path,
           title: args.title,
           itemType: args.item_type,
+          fields: args.fields,
+          creators: args.creators,
           collections: args.collections,
           tags: args.tags,
           mode: args.mode,

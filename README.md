@@ -4,7 +4,8 @@
 在 Zotero 内置 HTTP 服务（127.0.0.1:23119）上注册 `/zotero-agent-mcp/` API，并提供**零依赖 MCP 桥**。
 **所有功能默认开放**，同时保留令牌鉴权、作用域开关、库白名单、速率限制与审计日志可随时收紧。
 
-已在本机 **Zotero 10.0.2 (macOS)** 真机安装并全量测试通过（HTTP 27/27、MCP E2E 21/21）。
+已在本机真机安装并全量测试通过：**Zotero 10.0.2 (macOS)** HTTP 27/27、MCP E2E 21/21；
+**Zotero 10.0.3 (Windows)** MCP E2E 24/24（含 fields/creators 元数据回读），HTTP 路径修复随 v0.4.1 复验。
 
 ## 功能一览
 
@@ -23,7 +24,7 @@
 | 附件原文件（base64） | `/item/:key/file` ⇄ `zotero_get_item`+`file` | files |
 | 新增子笔记 | `POST /note` ⇄ `zotero_add_note` | write |
 | 增/删标签 | `POST /tag` ⇄ `zotero_add_tag` | write |
-| **本地文档建条目**（导入/链接附件、入集合、自动识别元数据） | `POST /item` ⇄ `zotero_add_item` | write |
+| **本地文档建条目**（导入/链接附件、fields/creators 完整元数据、入集合、自动识别） | `POST /item` ⇄ `zotero_add_item` | write |
 
 ## 安装
 
@@ -88,7 +89,16 @@ tools/test_bridge.mjs  MCP 桥 E2E（initialize/tools/list/全部 13 工具）
 DESIGN.md          grillme 自问自答设计文档 + 验收矩阵
 ```
 
-## 真机测试结论（Zotero 10.0.2）
+## 真机测试结论（Zotero 10.0.3 Windows，v0.4.0）
+
+- MCP 桥 E2E 21/21 + `zotero_add_item` fields/creators 元数据回读 3/3 ✅
+  （中文单字段作者 `{name}`、西文 `{firstName,lastName}`、无效字段进 `skippedFields`）
+- HTTP 套件 26/27：唯一失败 = 新版 Gecko `initWithPath` 拒绝正斜杠路径。
+  已修复（Windows 下路径分隔符归一化 + `pathToFile` try/catch 干净 404），随 v0.4.1 真机复验。
+- Windows 踩坑：MSYS/Git Bash 的 `/tmp` 对 Zotero 进程不可见——测试脚本已改用
+  `cygpath` 转真实 Windows 路径，python 探测改为 `python3 || python` + `PYTHONUTF8=1`。
+
+## 真机测试结论（Zotero 10.0.2 macOS）
 
 - 安装/重启自动加载、令牌持久化、桥文件自动释放 ✅
 - HTTP：鉴权负例 401、未知路由 404、坏参数 400、未知条目 404、未知样式 400、

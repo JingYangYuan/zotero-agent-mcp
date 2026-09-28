@@ -6,11 +6,17 @@
  */
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
+import { writeFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const bridgePath = process.argv[2] || path.join(root, "bridge", "bridge.mjs");
+const bridgePath = process.argv[2] || path.join(root, "bridge", "zotero-agent-mcp.mjs");
+
+const N_TOOLS = 13; // bump when adding a tool
+// Env gate: CREATE_ITEM_TEST=1 also exercises zotero_add_item (writes to the library)
+const CREATE_ITEM_TEST = process.env.CREATE_ITEM_TEST === "1";
 
 let pass = 0;
 let fail = 0;
@@ -92,7 +98,7 @@ try {
 
   const tools = await request("tools/list", {});
   const names = (tools.result?.tools || []).map((t) => t.name);
-  ok("tools/list has 13 tools", names.length === 13, `got ${names.length}: ${names.join(",")}`);
+  ok(`tools/list has ${N_TOOLS} tools`, names.length === N_TOOLS, `got ${names.length}: ${names.join(",")}`);
 
   const ping = await tool("zotero_ping", {});
   ok("zotero_ping ok", !ping.isError && ping.parsed?.plugin === "zotero-agent-mcp", ping.text?.slice(0, 200));
@@ -159,6 +165,39 @@ try {
 
   const bad = await tool("zotero_get_item", { key: "ZZZZZZZZ" });
   ok("unknown key -> clean error", bad.isError && /not_found/.test(bad.text), bad.text?.slice(0, 150));
+
+  if (CREATE_ITEM_TEST) {
+    // v0.4.0: zotero_add_item with fields + creators. os.tmpdir() is a real Windows
+    // path when node runs natively, so the Zotero process can read the file.
+    const pdfPath = path.join(os.tmpdir(), "zotero-agent-mcp-bridge-test.pdf");
+    writeFileSync(pdfPath, "%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n");
+    const created = await tool("zotero_add_item", {
+      path: pdfPath,
+      title: "Bridge Suite Metadata",
+      item_type: "journalArticle",
+      fields: { date: "2023", publicationTitle: "测试期刊", DOI: "10.1234/bridge", bogusField: "x" },
+      creators: [{ name: "李四" }, { firstName: "Jane", lastName: "Doe" }],
+      tags: ["zotero-agent-mcp-e2e"],
+    });
+    const c = created.parsed;
+    if (!created.isError && c?.created === true) {
+      ok("zotero_add_item created", true);
+      ok("zotero_add_item skippedFields", Array.isArray(c.skippedFields) && c.skippedFields.includes("bogusField"), JSON.stringify(c).slice(0, 200));
+      const back = await tool("zotero_get_item", { key: c.itemKey });
+      const b = back.parsed;
+      ok(
+        "zotero_add_item metadata roundtrip",
+        !back.isError && b?.date === "2023" && b?.publicationTitle === "测试期刊" && b?.creators?.[0]?.name === "李四" && b?.creators?.some((x) => x.lastName === "Doe"),
+        back.text?.slice(0, 300)
+      );
+    } else {
+      ok("zotero_add_item created", false, created.text?.slice(0, 300));
+      ok("zotero_add_item skippedFields", false);
+      ok("zotero_add_item metadata roundtrip", false);
+    }
+  } else {
+    console.log("SKIP  zotero_add_item cases (set CREATE_ITEM_TEST=1)");
+  }
 
   const unknown = await request("tools/call", { name: "no_such_tool", arguments: {} });
   ok("unknown tool -> isError content", !!unknown.result?.isError || !!unknown.error, JSON.stringify(unknown).slice(0, 150));

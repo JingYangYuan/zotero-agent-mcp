@@ -1,8 +1,8 @@
 {
   "manifest_version": 2,
   "name": "Zotero-Agent-MCP",
-  "version": "0.3.1",
-  "description": "Let local AI agents (ZCode / Claude / Cursor) read and file into your Zotero library: token-protected HTTP API + zero-dependency MCP bridge (metadata, fulltext, annotations, citations, notes/tags, local file import).",
+  "version": "0.4.0",
+  "description": "Let local AI agents (ZCode / Claude / Cursor) read and file into your Zotero library: token-protected HTTP API + zero-dependency MCP bridge (metadata, fulltext, annotations, citations, notes/tags, full-metadata item creation, local file import).",
   "author": "yjy",
   "homepage_url": "https://github.com/JingYangYuan/zotero-agent-mcp",
   "icons": {
