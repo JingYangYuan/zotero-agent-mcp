@@ -917,7 +917,8 @@ var AgentMCP = new function () {
   // POST JSON: {path, title?, itemType?, fields?, creators?, collections?[], tags?[],
   //             mode? 'import'|'link', parentKey?, library?, recognize?}
   async function resolveCollectionKeyOrName(libraryID, s) {
-    let cols = Zotero.Collections.getByLibrary(libraryID);
+    // recursive=true so nested subcollections resolve by key/name too
+    let cols = Zotero.Collections.getByLibrary(libraryID, true);
     let c = cols.find((x) => !x.deleted && (x.key === s || x.name === s));
     if (!c) {
       throw new ABError(404, "not_found", `No collection '${s}' in library ${libraryID} (match by collection key or exact name)`);
@@ -1079,6 +1080,62 @@ var AgentMCP = new function () {
     return { key: item.key, tag, action, changed, tags: item.getTags().map((t) => t.tag) };
   };
 
+  // Change an item's collection memberships in one save.
+  // POST JSON: {collections: [key or exact name], mode?: 'replace'|'add'|'remove', library?}
+  // mode 'replace' (default) sets the full membership list; empty array clears it.
+  const hSetItemCollections = async (ctx) => {
+    if (ctx.method !== "POST") {
+      throw new ABError(400, "bad_request", "POST JSON {collections: [collection key or exact name], mode?: 'replace'|'add'|'remove', library?}");
+    }
+    let data = ctx.data || {};
+    let libraryID = await resolveLibrary(data.library || "user");
+    requireEditable(libraryID);
+    let item = await findItem(libraryID, ctx.pathParams.key);
+    if (!item.isTopLevelItem()) {
+      throw new ABError(400, "bad_request", "Only top-level items can be collection members (child notes/attachments cannot)");
+    }
+    let mode = String(data.mode || "replace").toLowerCase();
+    if (!["replace", "add", "remove"].includes(mode)) {
+      throw new ABError(400, "bad_request", "mode must be 'replace' (default), 'add' or 'remove'");
+    }
+    if (!Array.isArray(data.collections)) {
+      throw new ABError(400, "bad_request", "'collections' must be an array of collection keys or exact names");
+    }
+    if (!data.collections.length && mode !== "replace") {
+      throw new ABError(400, "bad_request", "'collections' must be non-empty unless mode is 'replace' (which clears membership)");
+    }
+    let seen = new Set();
+    let ids = [];
+    for (let c of data.collections.slice(0, 200)) {
+      let col = await resolveCollectionKeyOrName(libraryID, String(c));
+      if (!seen.has(col.id)) {
+        seen.add(col.id);
+        ids.push(col.id);
+      }
+    }
+    // setCollections dedupes, accepts ids/keys, and no-ops when unchanged;
+    // add/remove are computed here so the whole change is a single saveTx.
+    let before = item.getCollections().slice().sort((a, b) => a - b).join();
+    let current = item.getCollections();
+    let final;
+    if (mode === "replace") {
+      final = ids;
+    } else if (mode === "add") {
+      let cur = new Set(current);
+      final = current.concat(ids.filter((id) => !cur.has(id)));
+    } else {
+      final = current.filter((id) => !seen.has(id));
+    }
+    item.setCollections(final);
+    let changed = item.getCollections().slice().sort((a, b) => a - b).join() !== before;
+    if (changed) await item.saveTx();
+    let collections = item.getCollections().map((id) => {
+      let col = Zotero.Collections.get(id);
+      return { key: col.key, name: col.name };
+    });
+    return { key: item.key, mode, changed, collections };
+  };
+
   // ---------- route table ----------
   const ROUTES = [
     { path: "/zotero-agent-mcp/ping", scope: null, handler: hPing },
@@ -1093,6 +1150,7 @@ var AgentMCP = new function () {
     { path: "/zotero-agent-mcp/item/:key/cite", scope: "export", handler: hCite },
     { path: "/zotero-agent-mcp/item/:key/file", scope: "files", handler: hFile },
     { path: "/zotero-agent-mcp/item", scope: "write", handler: hCreateItem, methods: ["POST"] },
+    { path: "/zotero-agent-mcp/item/:key/collections", scope: "write", handler: hSetItemCollections, methods: ["POST"] },
     { path: "/zotero-agent-mcp/note", scope: "write", handler: hNote, methods: ["POST"] },
     { path: "/zotero-agent-mcp/tag", scope: "write", handler: hTag, methods: ["POST"] },
   ];

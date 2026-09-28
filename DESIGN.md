@@ -33,7 +33,7 @@
 - ③ → **速率限制**（默认 240 req/min，可关）+ 全文分页（`max_chars`/`offset`，默认上限 200k 字符）。
 - 最小权限 → 六个**作用域开关**：`read`（元数据/集合/搜索）、`fulltext`、`annotations`、`export`（引文）、`write`（笔记/标签）、`files`（下载附件原文件，**默认关**）。
 - 库级限制 → 可填"允许的 libraryID 白名单"，空=全部。
-- 写操作最小化 → 只允许**新增子笔记、增删标签**，不允许删除/修改条目本体；群组库只读属性尊重 `editable`。
+- 写操作最小化 → 只允许**新增子笔记、增删标签、本地文件建条目、改集合归属**，不允许删除/修改条目本体；群组库只读属性尊重 `editable`。
 
 **Q7. 令牌放哪、会不会泄漏进日志？**
 存 `extensions.zotero.zotero-agent-mcp.token`（随插件卸载由 Zotero 清理分支）；审计日志**不记 query string**（防令牌经 `?token=` 泄漏进日志），令牌只记前 4 位指纹。文档仍建议用 Header 传令牌。
@@ -63,6 +63,8 @@ MCP stdio 传输 = 按行分隔的 JSON-RPC 2.0，手写 300 行 Node 脚本（�
 | GET | `/zotero-agent-mcp/item/:key/children?library=` | read | 子附件/子笔记 |
 | GET | `/zotero-agent-mcp/item/:key/cite?library=&style=&format=` | export | bibliography/citation/bibtex |
 | GET | `/zotero-agent-mcp/item/:key/file?library=` | files | 附件原文件（默认关） |
+| POST | `/zotero-agent-mcp/item` | write | 本地文件建条目 `{path, title?, itemType?, fields?, creators?, collections?, tags?, mode?, parentKey?, library?, recognize?}` |
+| POST | `/zotero-agent-mcp/item/:key/collections` | write | 改集合归属 `{collections: [key|精确名], mode?: 'replace'\|'add'\|'remove', library?}` |
 | POST | `/zotero-agent-mcp/note` | write | 给条目加子笔记 `{itemKey, html}` |
 | POST | `/zotero-agent-mcp/tag` | write | `{itemKey, tag, action:"add"\|"remove"}` |
 

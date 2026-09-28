@@ -5,7 +5,7 @@
 **所有功能默认开放**，同时保留令牌鉴权、作用域开关、库白名单、速率限制与审计日志可随时收紧。
 
 已在本机真机安装并全量测试通过：**Zotero 10.0.2 (macOS)** HTTP 27/27、MCP E2E 21/21；
-**Zotero 10.0.3 (Windows)** MCP E2E 24/24（含 fields/creators 元数据回读），HTTP 路径修复随 v0.4.1 复验。
+**Zotero 10.0.3 (Windows)** HTTP 45/45（写库闸门全开）、MCP E2E 29/29（14 工具全量）。
 
 ## 功能一览
 
@@ -24,6 +24,7 @@
 | 附件原文件（base64） | `/item/:key/file` ⇄ `zotero_get_item`+`file` | files |
 | 新增子笔记 | `POST /note` ⇄ `zotero_add_note` | write |
 | 增/删标签 | `POST /tag` ⇄ `zotero_add_tag` | write |
+| **改集合**（替换/加入/移出，按 key 或精确名，含子集合） | `POST /item/:key/collections` ⇄ `zotero_set_item_collections` | write |
 | **本地文档建条目**（导入/链接附件、fields/creators 完整元数据、入集合、自动识别） | `POST /item` ⇄ `zotero_add_item` | write |
 
 ## 安装
@@ -68,13 +69,17 @@ curl -H "Authorization: Bearer <令牌>" "http://127.0.0.1:23119/zotero-agent-mc
 curl -X POST -H "Authorization: Bearer <令牌>" -H "Content-Type: application/json" \
   -d '{"path":"/path/to/paper.pdf","itemType":"document","collections":["我的收藏"],"tags":["agent"],"recognize":true}' \
   http://127.0.0.1:23119/zotero-agent-mcp/item
+# 改条目集合归属：replace（默认，全量替换）/ add / remove；空数组+replace=清空
+curl -X POST -H "Authorization: Bearer <令牌>" -H "Content-Type: application/json" \
+  -d '{"mode":"add","collections":["新就业组织·文献脉络"]}' \
+  http://127.0.0.1:23119/zotero-agent-mcp/item/<KEY>/collections
 ```
 
 ## 安全模型
 
 - 仅绑定 `127.0.0.1`；Zotero 自带 Host 头校验（防 DNS rebinding）与浏览器请求拦截。
 - 所有业务端点需要 `Authorization: Bearer <令牌>`（或 `X-Agent-Token`），令牌可在面板随时重新生成。
-- 六个作用域**默认全部开放**，可单独关闭收紧；`write` 仅含新增子笔记、增删标签、本地文件建条目，不提供删除/改写条目本体。
+- 六个作用域**默认全部开放**，可单独关闭收紧；`write` 仅含新增子笔记、增删标签、本地文件建条目、改集合归属，不提供删除/改写条目本体。
 - 库白名单（留空=全部）、速率限制（默认 240 req/min）、全文分页与附件大小上限。
 - 审计日志：`~/Zotero/zotero-agent-mcp-audit.jsonl`（JSONL，可关闭；不记录完整令牌）。
 
@@ -84,19 +89,25 @@ curl -X POST -H "Authorization: Bearer <令牌>" -H "Content-Type: application/j
 plugin/            插件源码（manifest.json / bootstrap.js / zotero-agent-mcp.js / prefs.* / icon.png）
 bridge/zotero-agent-mcp.mjs  MCP 桥（零依赖 Node，随包释放到 ~/Zotero/zotero-agent-mcp/）
 tools/build.sh     构建 xpi（含把桥打进插件的 bridge-source.js 生成）
-tools/test_api.sh  HTTP 全端点测试（含鉴权负例；RUN_NOTE_TEST/CREATE_ITEM_TEST 控制写库用例）
-tools/test_bridge.mjs  MCP 桥 E2E（initialize/tools/list/全部 13 工具）
+tools/test_api.sh  HTTP 全端点测试（含鉴权负例；RUN_NOTE_TEST/CREATE_ITEM_TEST/SET_COLLECTIONS_TEST 控制写库用例）
+tools/test_bridge.mjs  MCP 桥 E2E（initialize/tools/list/全部 14 工具）
+tools/authorize_localapi.sh  一次性本地 API 写授权（供测试播种集合，key 缓存 tools/.localapi-key）
 DESIGN.md          grillme 自问自答设计文档 + 验收矩阵
 ```
 
-## 真机测试结论（Zotero 10.0.3 Windows，v0.4.0）
+## 真机测试结论（Zotero 10.0.3 Windows，v0.4.1）
 
-- MCP 桥 E2E 21/21 + `zotero_add_item` fields/creators 元数据回读 3/3 ✅
-  （中文单字段作者 `{name}`、西文 `{firstName,lastName}`、无效字段进 `skippedFields`）
-- HTTP 套件 26/27：唯一失败 = 新版 Gecko `initWithPath` 拒绝正斜杠路径。
-  已修复（Windows 下路径分隔符归一化 + `pathToFile` try/catch 干净 404），随 v0.4.1 真机复验。
-- Windows 踩坑：MSYS/Git Bash 的 `/tmp` 对 Zotero 进程不可见——测试脚本已改用
-  `cygpath` 转真实 Windows 路径，python 探测改为 `python3 || python` + `PYTHONUTF8=1`。
+- HTTP 套件 45/45（RUN_NOTE_TEST / CREATE_ITEM_TEST / SET_COLLECTIONS_TEST 全开）✅
+- MCP 桥 E2E 29/29：14 工具全量，含 fields/creators 元数据回读
+  （中文单字段 `{name}`、西文 `{firstName,lastName}`、无效字段进 `skippedFields`）
+  与改集合（replace/no-op/按名 add/remove/404/400）✅
+- Windows 移植修复（真机回归发现，v0.4.0 时 26/27 唯一失败）：
+  新版 Gecko `initWithPath` 拒绝正斜杠路径 → 建条目前归一化分隔符；
+  `pathToFile` 抛错改为干净 404。
+- Windows 踩坑：MSYS/Git Bash 的 `/tmp` 对 Zotero 进程不可见——测试脚本已用
+  `cygpath` 转真实 Windows 路径；python 探测 `python3 || python` + `PYTHONUTF8=1`。
+- 改集合用例的集合播种走 Zotero 10 本地 API（写需持久 key）：一次性运行
+  `tools/authorize_localapi.sh`（Zotero 弹窗点"始终允许"），key 缓存于 `tools/.localapi-key`。
 
 ## 真机测试结论（Zotero 10.0.2 macOS）
 

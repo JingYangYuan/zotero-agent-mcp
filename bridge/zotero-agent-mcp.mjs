@@ -14,7 +14,7 @@ import readline from "node:readline";
 
 const BASE_URL = (process.env.ZOTERO_AGENT_URL || "http://127.0.0.1:23119/zotero-agent-mcp").replace(/\/+$/, "");
 const TOKEN = process.env.ZOTERO_AGENT_TOKEN || "";
-const VERSION = "0.4.0";
+const VERSION = "0.4.1";
 
 function log(msg) {
   process.stderr.write(`[zotero-agent-mcp] ${msg}\n`);
@@ -207,6 +207,22 @@ const TOOLS = [
     },
   },
   {
+    name: "zotero_set_item_collections",
+    description:
+      "Change which collections an item belongs to: replace the full membership list (default), add to collections, or remove from collections. Collections are matched by collection key or exact name (nested subcollections included). Requires the plugin's 'write' scope to be enabled in Zotero Settings → AgentMCP.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        key: str("Zotero item key"),
+        collections: { type: "array", items: { type: "string" }, description: "Collection keys or exact collection names; empty array with mode='replace' clears membership" },
+        mode: str("'replace' (default, set the full list), 'add' or 'remove'"),
+        library: LIBRARY_PARAM,
+      },
+      required: ["key", "collections"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "zotero_add_note",
     description:
       "Add a child note to an item (plain text or simple HTML). Requires the plugin's 'write' scope to be enabled in Zotero Settings → AgentMCP.",
@@ -292,6 +308,11 @@ async function callTool(name, args) {
           library: args.library,
           recognize: args.recognize,
         },
+      });
+    case "zotero_set_item_collections":
+      return api(`/item/${encodeURIComponent(args.key)}/collections`, {
+        method: "POST",
+        body: { collections: args.collections, mode: args.mode, library: args.library },
       });
     case "zotero_add_note":
       return api("/note", {
