@@ -103,18 +103,32 @@
 
   async function refreshStatus() {
     try {
-      let st = $("ab-bridge-status");
+      // hero: version chip, endpoint, running status
+      let ver = $("zam-version");
+      if (ver) ver.textContent = "v" + (Zotero.AgentMCP.version || "");
+      let url = $("zam-url");
+      if (url) url.textContent = baseUrl();
+      let st = $("zam-status");
+      if (st) {
+        let on = !!P("enabled");
+        st.classList.toggle("off", !on);
+        st.textContent = on ? "运行中" : "已停用";
+      }
+
       let bridgePath = Zotero.AgentMCP.bridgePath();
       let exists = await IOUtils.exists(bridgePath);
-      st.value = exists ? `桥接脚本：${bridgePath}` : "桥接脚本尚未释放（重启 Zotero 或稍候）";
+      let bs = $("ab-bridge-status");
+      if (bs) bs.textContent = exists ? `桥接脚本：${bridgePath}` : "桥接脚本尚未释放（重启 Zotero 或稍候）";
       let ai = $("ab-audit-info");
-      let auditPath = Zotero.AgentMCP.auditPath();
-      let size = "";
-      try {
-        let stat = await IOUtils.stat(auditPath);
-        size = `，${(stat.size / 1024).toFixed(1)} KB`;
-      } catch (e) {}
-      ai.value = `日志：${auditPath}${size}`;
+      if (ai) {
+        let auditPath = Zotero.AgentMCP.auditPath();
+        let size = "";
+        try {
+          let stat = await IOUtils.stat(auditPath);
+          size = ` · ${(stat.size / 1024).toFixed(1)} KB`;
+        } catch (e) {}
+        ai.textContent = `日志：${auditPath}${size}`;
+      }
     } catch (e) {}
   }
 
@@ -137,6 +151,7 @@
   function init() {
     // Enable toggle + scopes
     bindCheck("ab-enabled", "enabled");
+    $("ab-enabled")?.addEventListener("command", refreshStatus);
     bindCheck("ab-scope-read", "scope-read");
     bindCheck("ab-scope-fulltext", "scope-fulltext");
     bindCheck("ab-scope-annotations", "scope-annotations");

@@ -14,7 +14,7 @@ import readline from "node:readline";
 
 const BASE_URL = (process.env.ZOTERO_AGENT_URL || "http://127.0.0.1:23119/zotero-agent-mcp").replace(/\/+$/, "");
 const TOKEN = process.env.ZOTERO_AGENT_TOKEN || "";
-const VERSION = "0.4.1";
+const VERSION = "0.4.2";
 
 function log(msg) {
   process.stderr.write(`[zotero-agent-mcp] ${msg}\n`);
