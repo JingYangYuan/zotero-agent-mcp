@@ -39,7 +39,7 @@ var AgentMCP = new function () {
   let registeredEndpoints = [];
   let bridgeReleasedVersion = null;
   let rl = { windowStart: 0, count: 0 };
-  let bibtexTranslatorID = null;
+  let exportTranslatorCache = new Map();
 
   // ---------- errors ----------
   class ABError extends Error {
@@ -320,6 +320,8 @@ var AgentMCP = new function () {
     }
     out.dateAdded = item.dateAdded;
     out.dateModified = item.dateModified;
+    // exposed for optimistic concurrency: pass back to POST /item/:key/update as `version`
+    out.version = item.version;
     if (item.isRegularItem()) {
       try {
         let best = await item.getBestAttachment();
@@ -357,12 +359,12 @@ var AgentMCP = new function () {
     return Math.min(max, Math.max(min, n));
   }
 
-  async function findItem(libraryID, key) {
+  async function findItem(libraryID, key, opts = {}) {
     if (!key || !/^[A-Z0-9]{8}$/.test(String(key))) {
       throw new ABError(400, "bad_request", "item key must be an 8-character Zotero key like 'ABCD1234'");
     }
     let item = await Zotero.Items.getByLibraryAndKeyAsync(libraryID, key);
-    if (!item || item.deleted) {
+    if (!item || (item.deleted && !opts.includeTrashed)) {
       throw new ABError(404, "not_found", `No item '${key}' in library ${libraryID}`);
     }
     return item;
@@ -510,13 +512,30 @@ var AgentMCP = new function () {
   }
 
   // ---------- cite ----------
+  // Extra export formats beyond bibliography/citation/bibtex, via installed
+  // translators (labels verified against Zotero 10's installed translator set;
+  // unknown labels fall through to the "unknown format" 400 below).
+  const EXPORT_TRANSLATORS = {
+    bibtex: "BibTeX",
+    biblatex: "BibLaTeX",
+    ris: "RIS",
+    csljson: "CSL JSON",
+    csv: "CSV",
+    mods: "MODS",
+    refer: "Refer/BibIX",
+    tei: "TEI",
+    wikipedia: "Wikipedia Citation Templates",
+    marc: "MARC",
+  };
+
   async function citeJSON(items, params) {
     let format = (params.get("format") || "bibliography").toLowerCase();
-    if (!["bibliography", "citation", "bibtex"].includes(format)) {
-      throw new ABError(400, "bad_request", "format must be bibliography | citation | bibtex");
+    if (!["bibliography", "citation", "bibtex"].includes(format) && !(format in EXPORT_TRANSLATORS)) {
+      throw new ABError(400, "bad_request", "format must be bibliography | citation | bibtex | ris | csljson | csv | mods | refer | tei | wikipedia | biblatex | marc");
     }
-    if (format === "bibtex") {
-      let text = await exportBibtex(items);
+    if (format !== "bibliography" && format !== "citation") {
+      let label = format === "bibtex" ? "BibTeX" : EXPORT_TRANSLATORS[format];
+      let text = await exportWithTranslator(items, label);
       return { format, text };
     }
     let styleParam = params.get("style") || "apa";
@@ -543,22 +562,24 @@ var AgentMCP = new function () {
     return { format, style: styleID, text: res.text, html: res.html };
   }
 
-  async function exportBibtex(items) {
-    if (!bibtexTranslatorID) {
+  async function exportWithTranslator(items, label) {
+    let translatorID = exportTranslatorCache.get(label);
+    if (!translatorID) {
       let all = await Zotero.Translators.getAll();
-      let t = all.find((x) => x.label === "BibTeX");
-      if (!t) throw new ABError(500, "translator_missing", "BibTeX translator not found");
-      bibtexTranslatorID = t.translatorID;
+      let t = all.find((x) => x.label === label);
+      if (!t) throw new ABError(400, "unknown_format", `Export translator '${label}' not installed`);
+      translatorID = t.translatorID;
+      exportTranslatorCache.set(label, translatorID);
     }
     let translation = new Zotero.Translate.Export();
     translation.setItems(items.slice());
-    translation.setTranslator(bibtexTranslatorID);
+    translation.setTranslator(translatorID);
     let done = new Promise((resolve) => {
       translation.setHandler("done", (obj, worked) => resolve(worked ? obj.string || "" : ""));
     });
     await translation.translate();
     let text = await done;
-    if (!text) throw new ABError(500, "cite_failed", "BibTeX export produced no output");
+    if (!text) throw new ABError(500, "export_failed", `Export via '${label}' produced no output`);
     return text;
   }
 
@@ -657,6 +678,20 @@ var AgentMCP = new function () {
       await IOUtils.writeUTF8(dest, src);
     }
     await IOUtils.writeUTF8(stamp, String(AgentMCP.version));
+    // Agent routing skill — released next to the bridge so agents can install it
+    // (tools/install-skill.sh junctions it into the agent's skills directory).
+    if (AgentMCP._skillSource) {
+      let skillDir = PathUtils.join(dir, "skill");
+      await IOUtils.makeDirectory(skillDir, { ignoreExisting: true });
+      let skillDest = PathUtils.join(skillDir, "SKILL.md");
+      let curSkill = null;
+      try {
+        curSkill = await IOUtils.readUTF8(skillDest);
+      } catch (e) {}
+      if (curSkill !== AgentMCP._skillSource) {
+        await IOUtils.writeUTF8(skillDest, AgentMCP._skillSource);
+      }
+    }
     // convenience config file
     let cfg = {
       _comment: "Paste the 'mcpServers' block into your agent's MCP config. Works with ZCode, Claude Desktop/Code, Cursor, etc.",
@@ -698,6 +733,11 @@ var AgentMCP = new function () {
   }
 
   this.handle = async function (options, scope, handler) {
+    // `scope` may be a per-method map, e.g. { GET: "read", POST: "write" },
+    // so one path can serve reads and writes under different scopes.
+    if (scope && typeof scope === "object") {
+      scope = scope[options.method] ?? null;
+    }
     let t0 = Date.now();
     let status = 500;
     let body;
@@ -914,8 +954,10 @@ var AgentMCP = new function () {
   };
 
   // Create a new item from a local file and (optionally) file it into collections.
-  // POST JSON: {path, title?, itemType?, fields?, creators?, collections?[], tags?[],
+  // POST JSON: {path?, title?, itemType?, fields?, creators?, collections?[], tags?[],
   //             mode? 'import'|'link', parentKey?, library?, recognize?}
+  // With no `path`, creates a pure-metadata item (v0.5.0) — the common case for
+  // literature ingest, where the agent has bibliographic data but no local file.
   async function resolveCollectionKeyOrName(libraryID, s) {
     // recursive=true so nested subcollections resolve by key/name too
     let cols = Zotero.Collections.getByLibrary(libraryID, true);
@@ -926,12 +968,62 @@ var AgentMCP = new function () {
     return c;
   }
 
-  const hCreateItem = async (ctx) => {
-    if (ctx.method !== "POST") {
-      throw new ABError(400, "bad_request", "POST JSON {path, title?, itemType?, fields?, creators?, collections?, tags?, mode?, parentKey?, library?, recognize?}");
+  // Shared metadata appliers, used by item creation and update alike.
+
+  // `fields` maps Zotero field names to values; invalid/inapplicable names are
+  // skipped, not fatal, and reported via the returned array.
+  function applyItemFields(item, fields) {
+    let skipped = [];
+    if (!fields || typeof fields !== "object" || Array.isArray(fields)) return skipped;
+    for (let [fieldName, value] of Object.entries(fields)) {
+      if (fieldName === "title" || value === undefined || value === null || value === "") continue;
+      try {
+        item.setField(String(fieldName), String(value));
+      } catch (e) {
+        skipped.push(String(fieldName));
+      }
     }
-    let data = ctx.data || {};
-    let path = String(data.path || "").trim();
+    return skipped;
+  }
+
+  // `creators` accepts Zotero creator JSON: {creatorType?, name} for single-field
+  // names (common for Chinese authors) or {creatorType?, firstName, lastName}.
+  function applyItemCreators(item, creators) {
+    if (!Array.isArray(creators)) return;
+    let out = [];
+    for (let c of creators.slice(0, 200)) {
+      if (!c || typeof c !== "object") continue;
+      let creatorType = String(c.creatorType || "author");
+      if (!Zotero.CreatorTypes.getID(creatorType)) creatorType = "author";
+      if (c.name) {
+        out.push({ creatorType, name: String(c.name), fieldMode: 1 });
+      } else if (c.lastName || c.firstName) {
+        out.push({ creatorType, lastName: String(c.lastName || ""), firstName: String(c.firstName || ""), fieldMode: 0 });
+      }
+    }
+    if (out.length) item.setCreators(out);
+  }
+
+  function applyItemTags(item, tags) {
+    if (!Array.isArray(tags)) return;
+    for (let t of tags.slice(0, 50)) {
+      let tag = String(t || "").trim();
+      if (tag && !item.hasTag(tag)) item.addTag(tag);
+    }
+  }
+
+  async function applyItemCollections(item, libraryID, collections) {
+    if (!Array.isArray(collections) || !collections.length) return;
+    let collectionIDs = [];
+    for (let c of collections.slice(0, 50)) {
+      let col = await resolveCollectionKeyOrName(libraryID, String(c));
+      collectionIDs.push(col.id);
+    }
+    item.setCollections(collectionIDs);
+  }
+
+  function resolveLocalPath(path) {
+    path = String(path || "").trim();
     if (!path) throw new ABError(400, "bad_request", "'path' (absolute local file path) is required");
     // Windows: newer Gecko rejects forward slashes in initWithPath, and drive-less
     // paths throw — agents naturally emit forward-slash paths, so normalize first.
@@ -945,15 +1037,29 @@ var AgentMCP = new function () {
     if (!file.exists()) {
       throw new ABError(404, "file_not_found", `File not found: ${path}`);
     }
+    return file;
+  }
+
+  const hCreateItem = async (ctx) => {
+    if (ctx.method !== "POST") {
+      throw new ABError(400, "bad_request", "POST JSON {path?, title?, itemType?, fields?, creators?, collections?, tags?, mode?, parentKey?, library?, recognize?}");
+    }
+    let data = ctx.data || {};
+    let path = String(data.path || "").trim();
+    let file = path ? resolveLocalPath(path) : null;
     let libraryID = await resolveLibrary(data.library || "user");
     requireEditable(libraryID);
+
+    if (data.parentKey && !file) {
+      throw new ABError(400, "bad_request", "'parentKey' requires 'path' (attaches a file to an existing item — for metadata-less creation leave parentKey out)");
+    }
 
     let mode = (data.mode || "import").toLowerCase();
     if (!["import", "link"].includes(mode)) {
       throw new ABError(400, "bad_request", "mode must be 'import' (copy into Zotero storage) or 'link' (reference the original path)");
     }
 
-    let fileName = file.leafName;
+    let fileName = file ? file.leafName : "";
     let parent = null;
     let item = null;
     let skippedFields = [];
@@ -971,70 +1077,34 @@ var AgentMCP = new function () {
       item = new Zotero.Item(itemType);
       item.libraryID = libraryID;
       item.setField("title", String(data.title || fileName.replace(/\.[^.]+$/, "")));
-      // Optional full metadata: `fields` maps Zotero field names to values (date, publicationTitle,
-      // abstractNote, DOI, …); invalid/inapplicable field names are skipped, not fatal.
-      if (data.fields && typeof data.fields === "object" && !Array.isArray(data.fields)) {
-        for (let [fieldName, value] of Object.entries(data.fields)) {
-          if (fieldName === "title" || value === undefined || value === null || value === "") continue;
-          try {
-            item.setField(String(fieldName), String(value));
-          } catch (e) {
-            skippedFields.push(String(fieldName));
-          }
-        }
-      }
-      // `creators` accepts Zotero creator JSON: {creatorType?, name} for single-field names
-      // (common for Chinese authors) or {creatorType?, firstName, lastName}.
-      if (Array.isArray(data.creators)) {
-        let creators = [];
-        for (let c of data.creators.slice(0, 200)) {
-          if (!c || typeof c !== "object") continue;
-          let creatorType = String(c.creatorType || "author");
-          if (!Zotero.CreatorTypes.getID(creatorType)) creatorType = "author";
-          if (c.name) {
-            creators.push({ creatorType, name: String(c.name), fieldMode: 1 });
-          } else if (c.lastName || c.firstName) {
-            creators.push({ creatorType, lastName: String(c.lastName || ""), firstName: String(c.firstName || ""), fieldMode: 0 });
-          }
-        }
-        if (creators.length) item.setCreators(creators);
-      }
-      if (Array.isArray(data.tags)) {
-        for (let t of data.tags.slice(0, 50)) {
-          let tag = String(t || "").trim();
-          if (tag && !item.hasTag(tag)) item.addTag(tag);
-        }
-      }
-      if (Array.isArray(data.collections) && data.collections.length) {
-        let collectionIDs = [];
-        for (let c of data.collections.slice(0, 50)) {
-          let col = await resolveCollectionKeyOrName(libraryID, String(c));
-          collectionIDs.push(col.id);
-        }
-        item.setCollections(collectionIDs);
-      }
+      skippedFields = applyItemFields(item, data.fields);
+      applyItemCreators(item, data.creators);
+      applyItemTags(item, data.tags);
+      await applyItemCollections(item, libraryID, data.collections);
       await item.saveTx();
     }
 
-    let parentItemID = parent ? parent.id : item.id;
-    let attOpts = {
-      file,
-      parentItemID,
-      title: data.attachmentTitle ? String(data.attachmentTitle) : undefined,
-    };
-    let att;
-    try {
-      att = mode === "link"
-        ? await Zotero.Attachments.linkFromFile(attOpts)
-        : await Zotero.Attachments.importFromFile(attOpts);
-    } catch (e) {
-      if (!parent && item) {
-        await item.eraseTx();
+    let att = null;
+    if (file) {
+      let parentItemID = parent ? parent.id : item.id;
+      let attOpts = {
+        file,
+        parentItemID,
+        title: data.attachmentTitle ? String(data.attachmentTitle) : undefined,
+      };
+      try {
+        att = mode === "link"
+          ? await Zotero.Attachments.linkFromFile(attOpts)
+          : await Zotero.Attachments.importFromFile(attOpts);
+      } catch (e) {
+        if (!parent && item) {
+          await item.eraseTx();
+        }
+        throw new ABError(415, "attach_failed", `Could not attach file: ${e && e.message ? e.message : e}`);
       }
-      throw new ABError(415, "attach_failed", `Could not attach file: ${e && e.message ? e.message : e}`);
     }
 
-    if (data.recognize) {
+    if (att && data.recognize) {
       try {
         Zotero.RecognizeDocument.recognizeItems([att]);
       } catch (e) {
@@ -1042,15 +1112,16 @@ var AgentMCP = new function () {
       }
     }
 
-    return {
+    let out = {
       created: true,
-      mode,
+      mode: file ? mode : "metadata",
       itemKey: item ? item.key : parent.key,
       itemTitle: item ? item.getField("title") : parent.getField("title"),
-      attachmentKey: att.key,
       skippedFields,
       libraryID,
     };
+    if (att) out.attachmentKey = att.key;
+    return out;
   };
 
   const hTag = async (ctx) => {
@@ -1136,32 +1207,494 @@ var AgentMCP = new function () {
     return { key: item.key, mode, changed, collections };
   };
 
+  // ---------- collection helpers (v0.5.0) ----------
+  async function findCollection(libraryID, key) {
+    if (!key || !/^[A-Z0-9]{8}$/.test(String(key))) {
+      throw new ABError(400, "bad_request", "collection key must be an 8-character Zotero key like 'ABCD1234'");
+    }
+    let col = await Zotero.Collections.getByLibraryAndKeyAsync(libraryID, key);
+    if (!col || col.deleted) {
+      throw new ABError(404, "not_found", `No collection '${key}' in library ${libraryID}`);
+    }
+    return col;
+  }
+
+  async function ensureLoaded(obj) {
+    try {
+      await obj.loadAllData();
+    } catch (e) {}
+    return obj;
+  }
+
+  const hCreateCollection = async (ctx) => {
+    if (ctx.method !== "POST") throw new ABError(400, "bad_request", "POST JSON {name, parent?, library?}");
+    let data = ctx.data || {};
+    let libraryID = await resolveLibrary(data.library || "user");
+    requireEditable(libraryID);
+    let name = String(data.name || "").trim();
+    if (!name) throw new ABError(400, "bad_request", "'name' is required");
+    let col = new Zotero.Collection();
+    col.libraryID = libraryID;
+    col.name = name;
+    let parent = null;
+    if (data.parent !== undefined && data.parent !== null && data.parent !== "") {
+      parent = await resolveCollectionKeyOrName(libraryID, String(data.parent));
+      if (parent.key === col.key) throw new ABError(400, "bad_request", "A collection cannot be its own parent");
+      col.parentID = parent.id;
+    }
+    await col.saveTx();
+    return { created: true, key: col.key, name: col.name, parentKey: parent ? parent.key : null, libraryID };
+  };
+
+  const hUpdateCollection = async (ctx) => {
+    if (ctx.method !== "POST") throw new ABError(400, "bad_request", "POST JSON {name?, parent? (null = move to top), deleted?, library?}");
+    let data = ctx.data || {};
+    let libraryID = await resolveLibrary(data.library || "user");
+    requireEditable(libraryID);
+    let col = await findCollection(libraryID, ctx.pathParams.key);
+    if (data.name !== undefined && data.name !== null && String(data.name).trim()) {
+      col.name = String(data.name).trim();
+    }
+    if (data.parent !== undefined) {
+      if (data.parent === null || data.parent === false || data.parent === "") {
+        col.parentID = false; // move to top level
+      } else {
+        let parent = await resolveCollectionKeyOrName(libraryID, String(data.parent));
+        if (parent.key === col.key) throw new ABError(400, "bad_request", "A collection cannot be its own parent");
+        col.parentID = parent.id;
+      }
+    }
+    if (data.deleted !== undefined) {
+      col.deleted = !!data.deleted;
+    }
+    try {
+      await col.saveTx();
+    } catch (e) {
+      throw new ABError(400, "bad_request", `Could not update collection: ${e && e.message ? e.message : e}`);
+    }
+    return { key: col.key, name: col.name, parentKey: col.parentKey || null, deleted: !!col.deleted, libraryID };
+  };
+
+  const hDeleteCollection = async (ctx) => {
+    if (ctx.method !== "POST") throw new ABError(400, "bad_request", "POST JSON {permanent?, library?}");
+    let data = ctx.data || {};
+    let libraryID = await resolveLibrary(data.library || "user");
+    requireEditable(libraryID);
+    let col = await findCollection(libraryID, ctx.pathParams.key);
+    let permanent = !!data.permanent;
+    if (permanent) {
+      await col.eraseTx(); // member items are only unfiled, never deleted
+    } else {
+      col.deleted = true;
+      await col.saveTx();
+    }
+    return { key: col.key, deleted: true, permanent, libraryID };
+  };
+
+  const hSearchCollections = async (ctx) => {
+    let libraryID = await resolveLibrary(ctx.params.get("library") || "user");
+    let q = (ctx.params.get("q") || "").trim().toLowerCase();
+    if (!q) throw new ABError(400, "bad_request", "Missing 'q' query parameter");
+    let cols = Zotero.Collections.getByLibrary(libraryID, true).filter((c) => !c.deleted);
+    let byID = new Map(cols.map((c) => [c.id, c]));
+    function pathOf(c) {
+      let parts = [];
+      let cur = c;
+      while (cur) {
+        parts.unshift(cur.name);
+        cur = cur.parentID ? byID.get(cur.parentID) : null;
+      }
+      return parts.join(" / ");
+    }
+    let matches = cols
+      .filter((c) => c.name.toLowerCase().includes(q))
+      .slice(0, 50)
+      .map((c) => ({ key: c.key, name: c.name, parentKey: c.parentKey || null, path: pathOf(c) }));
+    return { query: q, total: matches.length, collections: matches };
+  };
+
+  const hCollectionItems = async (ctx) => {
+    let libraryID = await resolveLibrary(ctx.params.get("library") || "user");
+    // accept an 8-char key or an exact collection name
+    let col = /^[A-Z0-9]{8}$/.test(String(ctx.pathParams.key))
+      ? await findCollection(libraryID, ctx.pathParams.key)
+      : await resolveCollectionKeyOrName(libraryID, String(ctx.pathParams.key));
+    await ensureLoaded(col);
+    let limit = clampInt(ctx.params.get("limit"), 1, 100, 50);
+    let items = col.getChildItems(false, false).filter((i) => !i.deleted && i.isRegularItem());
+    return {
+      key: col.key,
+      name: col.name,
+      total: items.length,
+      items: await Promise.all(items.slice(0, limit).map((i) => itemToJSON(i))),
+    };
+  };
+
+  // ---------- item update / delete / trash (v0.5.0) ----------
+  const hUpdateItem = async (ctx) => {
+    if (ctx.method !== "POST") {
+      throw new ABError(400, "bad_request", "POST JSON {title?, fields?, creators?, tags?, collections?, note?, deleted?, version?, library?}");
+    }
+    let data = ctx.data || {};
+    let libraryID = await resolveLibrary(data.library || "user");
+    requireEditable(libraryID);
+    // includeTrashed so trashed items can be restored (deleted: false) or updated
+    let item = await findItem(libraryID, ctx.pathParams.key, { includeTrashed: true });
+    // `version` is accepted but informational only: Zotero assigns object versions
+    // asynchronously after local saves (queued), so a freshly read version can
+    // legitimately lag the current one and strict locking would false-positive.
+    if (data.title !== undefined && data.title !== null && String(data.title).trim()) {
+      item.setField("title", String(data.title));
+    }
+    let skippedFields = applyItemFields(item, data.fields);
+    applyItemCreators(item, data.creators);
+    if (Array.isArray(data.tags)) {
+      // web-API PATCH semantics: a tags array replaces the full set
+      for (let t of item.getTags()) item.removeTag(t.tag);
+      applyItemTags(item, data.tags);
+    }
+    if (data.collections !== undefined && data.collections !== null) {
+      if (!Array.isArray(data.collections)) throw new ABError(400, "bad_request", "'collections' must be an array of collection keys or exact names");
+      if (!data.collections.length) item.setCollections([]); // empty array clears membership
+      else await applyItemCollections(item, libraryID, data.collections);
+    }
+    if (data.note !== undefined && data.note !== null && item.isNote()) {
+      item.setNote(String(data.note).slice(0, MAX_NOTE_CHARS));
+    }
+    if (data.deleted !== undefined) {
+      item.deleted = !!data.deleted;
+    }
+    try {
+      await item.saveTx();
+    } catch (e) {
+      throw new ABError(400, "bad_request", `Could not update item: ${e && e.message ? e.message : e}`);
+    }
+    return { key: item.key, version: item.version, deleted: !!item.deleted, skippedFields, libraryID };
+  };
+
+  const hDeleteItem = async (ctx) => {
+    if (ctx.method !== "POST") throw new ABError(400, "bad_request", "POST JSON {permanent?, library?}");
+    let data = ctx.data || {};
+    let libraryID = await resolveLibrary(data.library || "user");
+    requireEditable(libraryID);
+    // includeTrashed: already-trashed items can be deleted permanently from the trash
+    let item = await findItem(libraryID, ctx.pathParams.key, { includeTrashed: true });
+    let permanent = !!data.permanent;
+    if (permanent) {
+      await item.eraseTx();
+    } else {
+      item.deleted = true; // trash — recoverable via update {deleted: false} or Zotero UI
+      await item.saveTx();
+    }
+    return { key: ctx.pathParams.key, deleted: true, permanent, libraryID };
+  };
+
+  const hTrash = async (ctx) => {
+    let libraryID = await resolveLibrary(ctx.params.get("library") || "user");
+    let limit = clampInt(ctx.params.get("limit"), 1, 100, 50);
+    let rows = await Zotero.DB.queryAsync(
+      `SELECT i.itemID AS itemID FROM items i
+       JOIN deletedItems d USING (itemID)
+       WHERE i.libraryID = ?
+       ORDER BY d.dateDeleted DESC LIMIT ?`,
+      [libraryID, limit]
+    );
+    let items = await Zotero.Items.getAsync(rows.map((r) => r.itemID));
+    return {
+      libraryID,
+      items: await Promise.all(items.map((i) => itemToJSON(i))),
+    };
+  };
+
+  const hAttachFile = async (ctx) => {
+    if (ctx.method !== "POST") throw new ABError(400, "bad_request", "POST JSON {path, mode? ('import'|'link'), title?, recognize?, library?}");
+    let data = ctx.data || {};
+    let libraryID = await resolveLibrary(data.library || "user");
+    requireEditable(libraryID);
+    let parent = await findItem(libraryID, ctx.pathParams.key);
+    if (!parent.isRegularItem()) {
+      throw new ABError(400, "bad_request", "Can only attach files to regular (top-level) items");
+    }
+    let file = resolveLocalPath(data.path);
+    let mode = (data.mode || "import").toLowerCase();
+    if (!["import", "link"].includes(mode)) {
+      throw new ABError(400, "bad_request", "mode must be 'import' or 'link'");
+    }
+    let att;
+    try {
+      att = mode === "link"
+        ? await Zotero.Attachments.linkFromFile({ file, parentItemID: parent.id, title: data.title ? String(data.title) : undefined })
+        : await Zotero.Attachments.importFromFile({ file, parentItemID: parent.id, title: data.title ? String(data.title) : undefined });
+    } catch (e) {
+      throw new ABError(415, "attach_failed", `Could not attach file: ${e && e.message ? e.message : e}`);
+    }
+    if (data.recognize) {
+      try {
+        Zotero.RecognizeDocument.recognizeItems([att]);
+      } catch (e) {}
+    }
+    return { key: parent.key, attachmentKey: att.key, mode, libraryID };
+  };
+
+  const hAttachmentPath = async (ctx) => {
+    let libraryID = await resolveLibrary(ctx.params.get("library") || "user");
+    let item = await findItem(libraryID, ctx.pathParams.key);
+    let att = await resolveAttachment(item);
+    if (!att) throw new ABError(404, "no_attachment", "Item has no attachment to locate");
+    let path = await att.getFilePathAsync();
+    if (!path) throw new ABError(404, "file_missing", "Attachment file not found on disk");
+    return { key: item.key, attachmentKey: att.key, path, contentType: att.attachmentContentType || null };
+  };
+
+  // ---------- tags (library-wide, v0.5.0) ----------
+  const hTags = async (ctx) => {
+    let libraryID = await resolveLibrary(ctx.params.get("library") || "user");
+    let tags = await Zotero.Tags.getAll(libraryID);
+    let out = tags
+      .map((t) => (t && typeof t === "object" ? { tag: t.tag, type: t.type ?? null } : { tag: String(t), type: null }))
+      .slice(0, 1000);
+    return { libraryID, total: out.length, tags: out };
+  };
+
+  const hDeleteTags = async (ctx) => {
+    if (ctx.method !== "POST") throw new ABError(400, "bad_request", "POST JSON {tags: [name, …] (max 50), library?}");
+    let data = ctx.data || {};
+    let libraryID = await resolveLibrary(data.library || "user");
+    requireEditable(libraryID);
+    if (!Array.isArray(data.tags) || !data.tags.length) {
+      throw new ABError(400, "bad_request", "'tags' must be a non-empty array of tag names");
+    }
+    let names = data.tags.slice(0, 50).map((t) => String(t || "").trim()).filter(Boolean);
+    let tagIDs = names.map((n) => Zotero.Tags.getID(n)).filter((id) => !!id);
+    if (tagIDs.length) {
+      await Zotero.Tags.removeFromLibrary(libraryID, tagIDs);
+    }
+    return { libraryID, requested: names.length, deleted: tagIDs.length };
+  };
+
+  // ---------- saved searches (v0.5.0) ----------
+  const hSearches = async (ctx) => {
+    let libraryID = await resolveLibrary(ctx.params.get("library") || "user");
+    let searches = await Zotero.Searches.getAll(libraryID);
+    let out = [];
+    for (let s of searches) {
+      if (s.deleted) continue;
+      out.push({ key: s.key, name: s.name, version: s.version });
+    }
+    return { libraryID, total: out.length, searches: out };
+  };
+
+  function validateSearchConditions(conditions) {
+    if (!Array.isArray(conditions) || !conditions.length) {
+      throw new ABError(400, "bad_request", "'conditions' must be a non-empty array of {condition, operator, value}");
+    }
+    return conditions.slice(0, 50).map((c) => ({
+      condition: String(c.condition || ""),
+      operator: String(c.operator || "contains"),
+      value: String(c.value ?? ""),
+    }));
+  }
+
+  const hCreateSearch = async (ctx) => {
+    if (ctx.method !== "POST") throw new ABError(400, "bad_request", "POST JSON {name, conditions: [{condition, operator, value}], library?}");
+    let data = ctx.data || {};
+    let libraryID = await resolveLibrary(data.library || "user");
+    requireEditable(libraryID);
+    let name = String(data.name || "").trim();
+    if (!name) throw new ABError(400, "bad_request", "'name' is required");
+    let conditions = validateSearchConditions(data.conditions);
+    let s = new Zotero.Search();
+    s.libraryID = libraryID;
+    try {
+      s.fromJSON({ name, conditions });
+    } catch (e) {
+      throw new ABError(400, "bad_request", `Invalid search conditions: ${e && e.message ? e.message : e}`);
+    }
+    await s.saveTx();
+    return { created: true, key: s.key, name: s.name, libraryID };
+  };
+
+  // One path, two methods: GET lists saved searches, POST creates one.
+  const hSearchesDispatch = async (ctx) => {
+    if (ctx.method === "POST") return hCreateSearch(ctx);
+    return hSearches(ctx);
+  };
+
+  const hUpdateSearch = async (ctx) => {
+    if (ctx.method !== "POST") throw new ABError(400, "bad_request", "POST JSON {name?, conditions?, library?}");
+    let data = ctx.data || {};
+    let libraryID = await resolveLibrary(data.library || "user");
+    requireEditable(libraryID);
+    let s = Zotero.Searches.getByLibraryAndKey(libraryID, ctx.pathParams.key);
+    if (!s || s.deleted) throw new ABError(404, "not_found", `No saved search '${ctx.pathParams.key}' in library ${libraryID}`);
+    await ensureLoaded(s);
+    if (data.conditions !== undefined) {
+      let conditions = validateSearchConditions(data.conditions);
+      try {
+        s.fromJSON({ name: String(data.name || s.name), conditions });
+      } catch (e) {
+        throw new ABError(400, "bad_request", `Invalid search conditions: ${e && e.message ? e.message : e}`);
+      }
+    } else if (data.name !== undefined && String(data.name).trim()) {
+      s.name = String(data.name).trim();
+    }
+    await s.saveTx();
+    return { key: s.key, name: s.name, version: s.version, libraryID };
+  };
+
+  const hDeleteSearch = async (ctx) => {
+    if (ctx.method !== "POST") throw new ABError(400, "bad_request", "POST JSON {library?}");
+    let data = ctx.data || {};
+    let libraryID = await resolveLibrary(data.library || "user");
+    requireEditable(libraryID);
+    let s = Zotero.Searches.getByLibraryAndKey(libraryID, ctx.pathParams.key);
+    if (!s || s.deleted) throw new ABError(404, "not_found", `No saved search '${ctx.pathParams.key}' in library ${libraryID}`);
+    await s.eraseTx();
+    return { key: ctx.pathParams.key, deleted: true, libraryID };
+  };
+
+  const hRunSearch = async (ctx) => {
+    let libraryID = await resolveLibrary(ctx.params.get("library") || "user");
+    let s = Zotero.Searches.getByLibraryAndKey(libraryID, ctx.pathParams.key);
+    if (!s || s.deleted) throw new ABError(404, "not_found", `No saved search '${ctx.pathParams.key}' in library ${libraryID}`);
+    await ensureLoaded(s);
+    let limit = clampInt(ctx.params.get("limit"), 1, 100, 50);
+    let ids = await s.search();
+    let items = (await Zotero.Items.getAsync(ids)).filter((i) => i.isRegularItem() && !i.deleted);
+    return {
+      key: s.key,
+      name: s.name,
+      total: items.length,
+      items: await Promise.all(items.slice(0, limit).map((i) => itemToJSON(i))),
+    };
+  };
+
+  // ---------- schema introspection (v0.5.0) ----------
+  const hSchema = async (ctx) => {
+    let itemType = ctx.params.get("itemType");
+    if (!itemType) {
+      return {
+        itemTypes: Zotero.ItemTypes.getAll().map((t) => ({ itemType: t.name, localized: Zotero.ItemTypes.getLocalizedString(t.name) })),
+      };
+    }
+    let typeID = Zotero.ItemTypes.getID(itemType);
+    if (!typeID) throw new ABError(400, "bad_request", `Unknown itemType '${itemType}'`);
+    let fields = Zotero.ItemFields.getItemTypeFields(typeID).map((fieldID) => ({
+      field: Zotero.ItemFields.getName(fieldID),
+      localized: Zotero.ItemFields.getLocalizedString(fieldID),
+    }));
+    let creatorTypes = Zotero.CreatorTypes.getTypesForItemType(typeID).map((c) =>
+      typeof c === "string"
+        ? { creatorType: c, localized: Zotero.CreatorTypes.getLocalizedString(c) }
+        : { creatorType: c.name || c.creatorType, localized: c.localized || null }
+    );
+    return { itemType, fields, creatorTypes };
+  };
+
+  // ---------- versions / incremental sync (v0.5.0) ----------
+  const hVersions = async (ctx) => {
+    let libraryID = await resolveLibrary(ctx.params.get("library") || "user");
+    let type = (ctx.params.get("type") || "items").toLowerCase();
+    let since = clampInt(ctx.params.get("since"), 0, 1000000000, 0);
+    let versions = {};
+    if (type === "items") {
+      let rows = await Zotero.DB.queryAsync("SELECT key, version FROM items WHERE libraryID=? AND version>?", [libraryID, since]);
+      for (let r of rows) versions[r.key] = r.version;
+    } else if (type === "collections") {
+      let rows = await Zotero.DB.queryAsync("SELECT key, version FROM collections WHERE libraryID=? AND version>?", [libraryID, since]);
+      for (let r of rows) versions[r.key] = r.version;
+    } else if (type === "searches") {
+      let rows = await Zotero.DB.queryAsync("SELECT key, version FROM savedSearches WHERE libraryID=? AND version>?", [libraryID, since]);
+      for (let r of rows) versions[r.key] = r.version;
+    } else if (type === "fulltext") {
+      let rows = await Zotero.DB.queryAsync(
+        "SELECT I.key, FI.version FROM fulltextItems FI JOIN items I USING (itemID) WHERE I.libraryID=?1 AND (?2=0 OR FI.version>?2)",
+        [libraryID, since]
+      );
+      for (let r of rows) versions[r.key] = r.version;
+    } else {
+      throw new ABError(400, "bad_request", "type must be items | collections | searches | fulltext");
+    }
+    return {
+      libraryID,
+      type,
+      since,
+      libraryVersion: Zotero.Libraries.get(libraryID).clientVersion,
+      total: Object.keys(versions).length,
+      versions,
+    };
+  };
+
+  // ---------- fulltext write (v0.5.0) ----------
+  const hSetFulltext = async (ctx) => {
+    if (ctx.method !== "POST") throw new ABError(400, "bad_request", "POST JSON {content, library?}");
+    let data = ctx.data || {};
+    let libraryID = await resolveLibrary(data.library || "user");
+    requireEditable(libraryID);
+    let item = await findItem(libraryID, ctx.pathParams.key);
+    let att = await resolveAttachment(item);
+    if (!att || !att.isFileAttachment()) {
+      throw new ABError(404, "no_attachment", "Item has no file attachment to index");
+    }
+    if (!Zotero.Fulltext.isCachedMIMEType(att.attachmentContentType)) {
+      throw new ABError(415, "unsupported_type", `Content type '${att.attachmentContentType}' cannot hold a text index`);
+    }
+    let content = String(data.content ?? "");
+    if (!content.length) throw new ABError(400, "bad_request", "'content' must be a non-empty string");
+    // Same sequence the local API uses: bump library version, write cache, flush
+    let library = Zotero.Libraries.get(libraryID);
+    let newVersion = await Zotero.DB.executeTransaction(async () => library.incrementClientVersion());
+    await Zotero.Fulltext.setItemContent(libraryID, att.key, { content }, newVersion);
+    await Zotero.Fulltext.indexSyncedContent(att.id);
+    return { key: item.key, attachmentKey: att.key, indexedChars: content.length, version: newVersion, libraryID };
+  };
+
   // ---------- route table ----------
   const ROUTES = [
     { path: "/zotero-agent-mcp/ping", scope: null, handler: hPing },
     { path: "/zotero-agent-mcp/libraries", scope: "read", handler: hLibraries },
     { path: "/zotero-agent-mcp/collections", scope: "read", handler: hCollections },
+    { path: "/zotero-agent-mcp/collections/search", scope: "read", handler: hSearchCollections },
+    { path: "/zotero-agent-mcp/collection/:key/items", scope: "read", handler: hCollectionItems },
     { path: "/zotero-agent-mcp/search", scope: "read", handler: hSearch },
     { path: "/zotero-agent-mcp/items/recent", scope: "read", handler: hRecent },
+    { path: "/zotero-agent-mcp/items/trash", scope: "read", handler: hTrash },
     { path: "/zotero-agent-mcp/item/:key", scope: "read", handler: hItem },
     { path: "/zotero-agent-mcp/item/:key/fulltext", scope: "fulltext", handler: hFulltext },
+    { path: "/zotero-agent-mcp/item/:key/fulltext/set", scope: "fulltext", handler: hSetFulltext, methods: ["POST"] },
     { path: "/zotero-agent-mcp/item/:key/annotations", scope: "annotations", handler: hAnnotations },
     { path: "/zotero-agent-mcp/item/:key/children", scope: "read", handler: hChildren },
     { path: "/zotero-agent-mcp/item/:key/cite", scope: "export", handler: hCite },
     { path: "/zotero-agent-mcp/item/:key/file", scope: "files", handler: hFile },
+    { path: "/zotero-agent-mcp/item/:key/path", scope: "files", handler: hAttachmentPath },
+    { path: "/zotero-agent-mcp/item/:key/update", scope: "write", handler: hUpdateItem, methods: ["POST"] },
+    { path: "/zotero-agent-mcp/item/:key/delete", scope: "write", handler: hDeleteItem, methods: ["POST"] },
+    { path: "/zotero-agent-mcp/item/:key/attach", scope: "write", handler: hAttachFile, methods: ["POST"] },
     { path: "/zotero-agent-mcp/item", scope: "write", handler: hCreateItem, methods: ["POST"] },
     { path: "/zotero-agent-mcp/item/:key/collections", scope: "write", handler: hSetItemCollections, methods: ["POST"] },
+    { path: "/zotero-agent-mcp/collection", scope: "write", handler: hCreateCollection, methods: ["POST"] },
+    { path: "/zotero-agent-mcp/collection/:key/update", scope: "write", handler: hUpdateCollection, methods: ["POST"] },
+    { path: "/zotero-agent-mcp/collection/:key/delete", scope: "write", handler: hDeleteCollection, methods: ["POST"] },
     { path: "/zotero-agent-mcp/note", scope: "write", handler: hNote, methods: ["POST"] },
     { path: "/zotero-agent-mcp/tag", scope: "write", handler: hTag, methods: ["POST"] },
+    { path: "/zotero-agent-mcp/tags", scope: "read", handler: hTags },
+    { path: "/zotero-agent-mcp/tags/delete", scope: "write", handler: hDeleteTags, methods: ["POST"] },
+    { path: "/zotero-agent-mcp/searches", scope: { GET: "read", POST: "write" }, handler: hSearchesDispatch, methods: ["GET", "POST"] },
+    { path: "/zotero-agent-mcp/search/:key/items", scope: "read", handler: hRunSearch },
+    { path: "/zotero-agent-mcp/search/:key/update", scope: "write", handler: hUpdateSearch, methods: ["POST"] },
+    { path: "/zotero-agent-mcp/search/:key/delete", scope: "write", handler: hDeleteSearch, methods: ["POST"] },
+    { path: "/zotero-agent-mcp/schema", scope: "read", handler: hSchema },
+    { path: "/zotero-agent-mcp/versions", scope: "read", handler: hVersions },
   ];
   this.ROUTES = ROUTES;
 
   // ---------- lifecycle ----------
-  this.startup = async function ({ id, version, rootURI, bridgeSource }) {
+  this.startup = async function ({ id, version, rootURI, bridgeSource, skillSource }) {
     this.id = id;
     this.version = version;
     this.rootURI = rootURI;
     this._bridgeSource = bridgeSource;
+    this._skillSource = skillSource;
     Zotero.AgentMCP = AgentMCP; // expose for prefs.js and debugging
     seedDefaults();
     await migrateOldBranding();

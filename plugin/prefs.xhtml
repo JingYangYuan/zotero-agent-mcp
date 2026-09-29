@@ -44,16 +44,7 @@
     .zam-div { height: 1px; background: rgba(127, 127, 127, 0.18); margin: 10px 0; }
     .zam-label { font-size: 12px; color: rgba(127, 127, 127, 0.95); margin-right: 10px; }
     .zam-token { flex: 1; font-family: Consolas, Menlo, monospace; font-size: 11px; min-width: 0; }
-    .zam-url {
-      font-family: Consolas, Menlo, monospace; font-size: 10.5px;
-      color: rgba(127, 127, 127, 0.85); margin: 4px 0 0 22px;
-    }
     .zam-hint { margin-top: 8px; font-size: 10.5px; color: rgba(127, 127, 127, 0.85); }
-    .zam-meta {
-      font-family: Consolas, Menlo, monospace; font-size: 10px;
-      color: rgba(127, 127, 127, 0.8); margin-top: 7px;
-      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-    }
     .zam-card button { margin: 0; }
     .zam-card hbox > button { margin-right: 8px; }
     .zam-card hbox > button:last-child { margin-right: 0; }
@@ -72,7 +63,6 @@
   <vbox class="zam-card">
     <html:div class="zam-sec">服务</html:div>
     <checkbox id="ab-enabled" label="启用服务（所有功能默认开放）"/>
-    <html:div class="zam-url" id="zam-url"></html:div>
     <html:div class="zam-div"/>
     <hbox align="center">
       <html:span class="zam-label">访问令牌</html:span>
@@ -84,17 +74,17 @@
   </vbox>
 
   <vbox class="zam-card">
-    <html:div class="zam-sec">功能权限<html:span class="zam-sec-note">默认全开 · 按需关闭</html:span></html:div>
+    <html:div class="zam-sec">功能权限</html:div>
     <hbox>
       <vbox class="zam-col" flex="1">
-        <checkbox id="ab-scope-read" label="read — 元数据 · 集合 · 搜索"/>
-        <checkbox id="ab-scope-fulltext" label="fulltext — 附件全文（PDF/EPUB）"/>
-        <checkbox id="ab-scope-annotations" label="annotations — 高亮与批注"/>
+        <checkbox id="ab-scope-read" label="read"/>
+        <checkbox id="ab-scope-fulltext" label="fulltext"/>
+        <checkbox id="ab-scope-annotations" label="annotations"/>
       </vbox>
       <vbox class="zam-col" flex="1">
-        <checkbox id="ab-scope-export" label="export — 引文输出（APA/BibTeX）"/>
-        <checkbox id="ab-scope-write" label="write — 笔记 · 标签 · 建条目 · 改集合"/>
-        <checkbox id="ab-scope-files" label="files — 附件原文件"/>
+        <checkbox id="ab-scope-export" label="export"/>
+        <checkbox id="ab-scope-write" label="write"/>
+        <checkbox id="ab-scope-files" label="files"/>
       </vbox>
     </hbox>
     <html:div class="zam-div"/>
@@ -116,7 +106,6 @@
       <button id="ab-copy-curl" label="复制 curl 示例"/>
       <button id="ab-open-bridge" label="打开桥接目录"/>
     </hbox>
-    <html:div class="zam-meta" id="ab-bridge-status">…</html:div>
   </vbox>
 
   <vbox class="zam-card">
@@ -125,7 +114,6 @@
       <checkbox id="ab-audit" label="记录访问审计日志（推荐开启）" style="flex: 1;"/>
       <button id="ab-open-audit" label="查看日志"/>
     </hbox>
-    <html:div class="zam-meta" id="ab-audit-info">…</html:div>
   </vbox>
 
 </vbox>

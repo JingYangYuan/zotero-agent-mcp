@@ -63,8 +63,26 @@ MCP stdio 传输 = 按行分隔的 JSON-RPC 2.0，手写 300 行 Node 脚本（�
 | GET | `/zotero-agent-mcp/item/:key/children?library=` | read | 子附件/子笔记 |
 | GET | `/zotero-agent-mcp/item/:key/cite?library=&style=&format=` | export | bibliography/citation/bibtex |
 | GET | `/zotero-agent-mcp/item/:key/file?library=` | files | 附件原文件（默认关） |
-| POST | `/zotero-agent-mcp/item` | write | 本地文件建条目 `{path, title?, itemType?, fields?, creators?, collections?, tags?, mode?, parentKey?, library?, recognize?}` |
+| POST | `/zotero-agent-mcp/item` | write | 建条目 `{path?, title?, itemType?, fields?, creators?, collections?, tags?, mode?, parentKey?, library?, recognize?}`——path 可省略（纯元数据建条目） |
+| POST | `/zotero-agent-mcp/item/:key/update` | write | 改条目 `{title?, fields?, creators?, tags?(全量替换), collections?(全量替换), note?, deleted?, version?(信息性), library?}` |
+| POST | `/zotero-agent-mcp/item/:key/delete` | write | 删条目 `{permanent?}`——默认进回收站，permanent 永删 |
 | POST | `/zotero-agent-mcp/item/:key/collections` | write | 改集合归属 `{collections: [key|精确名], mode?: 'replace'\|'add'\|'remove', library?}` |
+| POST | `/zotero-agent-mcp/item/:key/attach` | write | 给既有条目挂本地文件 `{path, mode?, title?, recognize?, library?}` |
+| GET | `/zotero-agent-mcp/item/:key/path?library=` | files | 附件本地路径 |
+| POST | `/zotero-agent-mcp/item/:key/fulltext/set` | fulltext | 写全文索引 `{content, library?}` |
+| GET | `/zotero-agent-mcp/items/trash?library=&limit=` | read | 回收站条目 |
+| POST | `/zotero-agent-mcp/collection` | write | 建集合 `{name, parent?, library?}` |
+| POST | `/zotero-agent-mcp/collection/:key/update` | write | 改集合 `{name?, parent?(null=顶层), deleted?, library?}` |
+| POST | `/zotero-agent-mcp/collection/:key/delete` | write | 删集合 `{permanent?}`——成员条目只解除归属 |
+| GET | `/zotero-agent-mcp/collections/search?q=&library=` | read | 按名搜集合（含父链路径） |
+| GET | `/zotero-agent-mcp/collection/:key/items?library=&limit=` | read | 集合内条目（key 或精确名） |
+| GET | `/zotero-agent-mcp/tags?library=` | read | 库内全部标签 |
+| POST | `/zotero-agent-mcp/tags/delete` | write | 整库删标签 `{tags: [名称]≤50, library?}` |
+| GET/POST | `/zotero-agent-mcp/searches` | read / write | 保存的检索：列表 / 创建 `{name, conditions:[{condition,operator,value}], library?}` |
+| GET | `/zotero-agent-mcp/search/:key/items?library=&limit=` | read | 执行保存的检索（本地 API 独有） |
+| POST | `/zotero-agent-mcp/search/:key/update`、`/delete` | write | 改 / 删保存的检索 |
+| GET | `/zotero-agent-mcp/schema?itemType=` | read | 字段/创作者角色自省 |
+| GET | `/zotero-agent-mcp/versions?type=items\|collections\|searches\|fulltext&since=&library=` | read | 增量版本映射 + 库版本 |
 | POST | `/zotero-agent-mcp/note` | write | 给条目加子笔记 `{itemKey, html}` |
 | POST | `/zotero-agent-mcp/tag` | write | `{itemKey, tag, action:"add"\|"remove"}` |
 
@@ -86,11 +104,17 @@ MCP stdio 传输 = 按行分隔的 JSON-RPC 2.0，手写 300 行 Node 脚本（�
 
 **Q15. 测试如何算"无 bug"？** 见 §2 验收矩阵——每个端点正/负例、权限负例、持久化、MCP E2E、UI 面板真机截图验证，全部通过才算完成。
 
-## 1. 非目标（v1 明确不做）
-- 不做删除条目/修改元数据的写接口（破坏性，收益低风险高）。
+## 1. 非目标
+- ~~不做删除条目/修改元数据的写接口~~ **v0.5.0 起修订**：为消除 agent 在 MCP 与 Zotero 本地 API v3 之间
+  "抢活"绕行（2026-09 论文任务实测返工），插件对齐本地 API 全部能力：条目/集合/保存检索的创建·修改·删除、
+  库级标签、全文索引写、增量版本、字段自省、多格式导出。删除默认进回收站（可恢复），`permanent` 显式 opt-in。
+  条目更新的 `version` 参数仅信息性——Zotero 本地保存后版本号异步分配（排队落账），读回即回传会误伤，
+  故不做强校验（web API 式乐观锁在本地不可靠）。破坏性上界：不提供"清空整库/批量不可恢复删除"类接口。
 - 不做多令牌/按 agent 分权（单令牌+全局作用域，文档留升级路径）。
 - 不做 GUI 阅读器集成、不做同步。
 - 不支持 Zotero 6（bootstrap 插件 7+ 专用）。
+- 不搬本地 API 的附件字节替换三段式上传（authorize→upload→register）：给既有条目挂文件用
+  `POST /item/:key/attach`（进程内 importFromFile/linkFromFile）替代；亦不搬 connector、publications、群组元数据详情。
 
 ## 2. 验收矩阵（真机测试清单）
 1. 安装：xpi 拖入 profile → Zotero 启动无错误弹窗，插件管理页显示已启用。

@@ -23,11 +23,12 @@ async function startup({ id, version, resourceURI, rootURI }, reason) {
 
   // Core module (endpoints, auth, scopes, audit). Assigns ctx.AgentMCP.
   Services.scriptloader.loadSubScript(rootURI + "zotero-agent-mcp.js", ctx);
-  // Bridge source as a JS string constant (jar:-safe, no fetch needed)
+  // Bridge source + agent skill as JS string constants (jar:-safe, no fetch needed)
   Services.scriptloader.loadSubScript(rootURI + "bridge-source.js", ctx);
+  Services.scriptloader.loadSubScript(rootURI + "skill-source.js", ctx);
 
   AgentMCP = ctx.AgentMCP;
-  await AgentMCP.startup({ id, version, rootURI, bridgeSource: ctx.BRIDGE_SRC });
+  await AgentMCP.startup({ id, version, rootURI, bridgeSource: ctx.BRIDGE_SRC, skillSource: ctx.SKILL_SRC });
 }
 
 function shutdown({ id, version, resourceURI, rootURI }, reason) {

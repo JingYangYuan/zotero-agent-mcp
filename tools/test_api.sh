@@ -1,7 +1,7 @@
 #!/bin/bash
 # HTTP API test suite for Zotero-Agent-MCP.
 # Usage: tools/test_api.sh <token>
-# Env gates: RUN_NOTE_TEST=1, CREATE_ITEM_TEST=1, SET_COLLECTIONS_TEST=1
+# Env gates: RUN_NOTE_TEST=1, CREATE_ITEM_TEST=1, SET_COLLECTIONS_TEST=1, MANAGE_TEST=1
 set -u
 TOKEN="${1:?usage: test_api.sh <token>}"
 BASE="http://127.0.0.1:23119/zotero-agent-mcp"
@@ -231,6 +231,161 @@ if [ "${SET_COLLECTIONS_TEST:-0}" = "1" ]; then
   fi
 else
   echo "SKIP  item collections cases (set SET_COLLECTIONS_TEST=1)"
+fi
+
+echo "== manage: collections CRUD / item update+delete / searches / schema (v0.5.0) =="
+if [ "${MANAGE_TEST:-0}" = "1" ]; then
+  # ---- collection CRUD ----
+  check "manage: create collection -> 200" 200 -X POST -H "$AUTH" -H "Content-Type: application/json" \
+    -d '{"name":"zotero-agent-mcp-e2e-manage"}' "$BASE/collection"
+  MCOLL=$(echo "$LAST_BODY" | "$PY" -c "import sys,json;print(json.load(sys.stdin).get('key',''))" 2>/dev/null)
+  if [ -n "$MCOLL" ]; then
+    PASS=$((PASS+1)); echo "PASS  manage collection key=$MCOLL"
+  else
+    FAIL=$((FAIL+1)); echo "FAIL  manage collection key"; echo "$LAST_BODY" | head -c 300; echo
+  fi
+  check "manage: create subcollection -> 200" 200 -X POST -H "$AUTH" -H "Content-Type: application/json" \
+    -d "{\"name\":\"zotero-agent-mcp-e2e-sub\",\"parent\":\"$MCOLL\"}" "$BASE/collection"
+  check "manage: search collections -> 200" 200 -H "$AUTH" "$BASE/collections/search?q=e2e-manage"
+  if echo "$LAST_BODY" | "$PY" -c "import sys,json;d=json.load(sys.stdin);assert any(c['key']=='$MCOLL' and 'e2e-sub' in c['path'] for c in d['collections']) or any('e2e-manage' in c['name'] for c in d['collections']),d" 2>/dev/null; then
+    PASS=$((PASS+1)); echo "PASS  search collections finds manage collection"
+  else
+    FAIL=$((FAIL+1)); echo "FAIL  search collections finds manage collection"; echo "$LAST_BODY" | head -c 400; echo
+  fi
+  check "manage: rename collection -> 200" 200 -X POST -H "$AUTH" -H "Content-Type: application/json" \
+    -d '{"name":"zotero-agent-mcp-e2e-manage-2"}' "$BASE/collection/$MCOLL/update"
+  check "manage: collection items empty -> 200" 200 -H "$AUTH" "$BASE/collection/$MCOLL/items"
+
+  # ---- pure-metadata item + update/delete cycle ----
+  check "manage: create metadata-only item -> 200" 200 -X POST -H "$AUTH" -H "Content-Type: application/json" \
+    -d '{"itemType":"journalArticle","title":"Manage Suite Item","creators":[{"name":"测试作者"}],"fields":{"date":"2020"},"tags":["zotero-agent-mcp-e2e"]}' "$BASE/item"
+  if echo "$LAST_BODY" | "$PY" -c "import sys,json;d=json.load(sys.stdin);assert d.get('mode')=='metadata' and 'attachmentKey' not in d,d" 2>/dev/null; then
+    PASS=$((PASS+1)); echo "PASS  metadata-only item (mode=metadata, no attachment)"
+  else
+    FAIL=$((FAIL+1)); echo "FAIL  metadata-only item"; echo "$LAST_BODY" | head -c 400; echo
+  fi
+  MKEY=$(echo "$LAST_BODY" | "$PY" -c "import sys,json;print(json.load(sys.stdin).get('itemKey',''))" 2>/dev/null)
+  check "manage: update fields -> 200" 200 -X POST -H "$AUTH" -H "Content-Type: application/json" \
+    -d '{"fields":{"volume":"28","pages":"31-40","bogusFieldX":"x"}}' "$BASE/item/$MKEY/update"
+  if echo "$LAST_BODY" | "$PY" -c "import sys,json;d=json.load(sys.stdin);assert d.get('skippedFields')==['bogusFieldX'],d" 2>/dev/null; then
+    PASS=$((PASS+1)); echo "PASS  update skips invalid field"
+  else
+    FAIL=$((FAIL+1)); echo "FAIL  update skips invalid field"; echo "$LAST_BODY" | head -c 400; echo
+  fi
+  check "manage: metadata readback -> 200" 200 -H "$AUTH" "$BASE/item/$MKEY"
+  MVER=$(echo "$LAST_BODY" | "$PY" -c "import sys,json;print(json.load(sys.stdin).get('version',''))" 2>/dev/null)
+  if echo "$LAST_BODY" | "$PY" -c "import sys,json;d=json.load(sys.stdin);assert d.get('volume')=='28' and d.get('pages')=='31-40' and d.get('creators',[{}])[0].get('name')=='测试作者',d" 2>/dev/null; then
+    PASS=$((PASS+1)); echo "PASS  updated fields+creators readback"
+  else
+    FAIL=$((FAIL+1)); echo "FAIL  updated fields+creators readback"; echo "$LAST_BODY" | head -c 400; echo
+  fi
+  check "manage: update with stale version -> 200 (informational only)" 200 -X POST -H "$AUTH" -H "Content-Type: application/json" \
+    -d "{\"version\":1,\"fields\":{\"date\":\"2022\"}}" "$BASE/item/$MKEY/update"
+  check "manage: update with current version -> 200" 200 -X POST -H "$AUTH" -H "Content-Type: application/json" \
+    -d "{\"version\":$MVER,\"fields\":{\"date\":\"2021\"}}" "$BASE/item/$MKEY/update"
+  check "manage: file item into collection -> 200" 200 -X POST -H "$AUTH" -H "Content-Type: application/json" \
+    -d "{\"collections\":[\"$MCOLL\"]}" "$BASE/item/$MKEY/collections"
+  check "manage: collection items now 1 -> 200" 200 -H "$AUTH" "$BASE/collection/$MCOLL/items"
+  if echo "$LAST_BODY" | "$PY" -c "import sys,json;d=json.load(sys.stdin);assert d.get('total')==1,d" 2>/dev/null; then
+    PASS=$((PASS+1)); echo "PASS  collection items total=1"
+  else
+    FAIL=$((FAIL+1)); echo "FAIL  collection items total=1"; echo "$LAST_BODY" | head -c 400; echo
+  fi
+
+  # ---- attach + path + set_fulltext ----
+  TMP_PDF2="${TMPDIR:-/tmp}/zotero-agent-mcp-manage.pdf"
+  TMP_PDF2_WIN=$(cygpath -m "$TMP_PDF2" 2>/dev/null || echo "$TMP_PDF2")
+  make_test_pdf "$TMP_PDF2"
+  check "manage: attach file -> 200" 200 -X POST -H "$AUTH" -H "Content-Type: application/json" \
+    -d "{\"path\":\"$TMP_PDF2_WIN\"}" "$BASE/item/$MKEY/attach"
+  rm -f "$TMP_PDF2"
+  check "manage: attachment path -> 200" 200 -H "$AUTH" "$BASE/item/$MKEY/path"
+  if echo "$LAST_BODY" | "$PY" -c "import sys,json;d=json.load(sys.stdin);p=d.get('path','');import re;assert re.match(r'^[A-Za-z]:\\\\',p) or p.startswith('/'),d" 2>/dev/null; then
+    PASS=$((PASS+1)); echo "PASS  attachment path is absolute"
+  else
+    FAIL=$((FAIL+1)); echo "FAIL  attachment path is absolute"; echo "$LAST_BODY" | head -c 400; echo
+  fi
+  check "manage: set fulltext -> 200" 200 -X POST -H "$AUTH" -H "Content-Type: application/json" \
+    -d '{"content":"manage suite fulltext probe content"}' "$BASE/item/$MKEY/fulltext/set"
+  check "manage: fulltext reflects set -> 200" 200 -H "$AUTH" "$BASE/item/$MKEY/fulltext?maxChars=2000"
+  if echo "$LAST_BODY" | "$PY" -c "import sys,json;d=json.load(sys.stdin);assert 'manage suite fulltext probe content' in d.get('content',''),d" 2>/dev/null; then
+    PASS=$((PASS+1)); echo "PASS  set_fulltext roundtrip"
+  else
+    FAIL=$((FAIL+1)); echo "FAIL  set_fulltext roundtrip"; echo "$LAST_BODY" | head -c 400; echo
+  fi
+
+  # ---- trash / restore / permanent ----
+  check "manage: delete item (trash) -> 200" 200 -X POST -H "$AUTH" -H "Content-Type: application/json" \
+    -d '{}' "$BASE/item/$MKEY/delete"
+  check "manage: trashed item get -> 404" 404 -H "$AUTH" "$BASE/item/$MKEY"
+  check "manage: trash list -> 200" 200 -H "$AUTH" "$BASE/items/trash?limit=100"
+  if echo "$LAST_BODY" | "$PY" -c "import sys,json;d=json.load(sys.stdin);assert any(i.get('key')=='$MKEY' for i in d.get('items',[])),d" 2>/dev/null; then
+    PASS=$((PASS+1)); echo "PASS  trash list contains deleted item"
+  else
+    FAIL=$((FAIL+1)); echo "FAIL  trash list contains deleted item"; echo "$LAST_BODY" | head -c 300; echo
+  fi
+  check "manage: restore from trash -> 200" 200 -X POST -H "$AUTH" -H "Content-Type: application/json" \
+    -d '{"deleted":false}' "$BASE/item/$MKEY/update"
+  check "manage: restored item get -> 200" 200 -H "$AUTH" "$BASE/item/$MKEY"
+  check "manage: delete permanent -> 200" 200 -X POST -H "$AUTH" -H "Content-Type: application/json" \
+    -d '{"permanent":true}' "$BASE/item/$MKEY/delete"
+  check "manage: permanently deleted get -> 404" 404 -H "$AUTH" "$BASE/item/$MKEY"
+
+  # ---- tags (library) ----
+  check "manage: get tags -> 200" 200 -H "$AUTH" "$BASE/tags"
+  check "manage: delete unknown tag -> 200 (no-op)" 200 -X POST -H "$AUTH" -H "Content-Type: application/json" \
+    -d '{"tags":["zotero-agent-mcp-e2e-no-such-tag"]}' "$BASE/tags/delete"
+
+  # ---- saved searches ----
+  check "manage: create search -> 200" 200 -X POST -H "$AUTH" -H "Content-Type: application/json" \
+    -d '{"name":"zotero-agent-mcp-e2e-search","conditions":[{"condition":"tag","operator":"is","value":"zotero-agent-mcp-e2e"}]}' "$BASE/searches"
+  SKEY=$(echo "$LAST_BODY" | "$PY" -c "import sys,json;print(json.load(sys.stdin).get('key',''))" 2>/dev/null)
+  check "manage: list searches -> 200" 200 -H "$AUTH" "$BASE/searches"
+  if echo "$LAST_BODY" | "$PY" -c "import sys,json;d=json.load(sys.stdin);assert any(s['key']=='$SKEY' for s in d.get('searches',[])),d" 2>/dev/null; then
+    PASS=$((PASS+1)); echo "PASS  searches list contains created"
+  else
+    FAIL=$((FAIL+1)); echo "FAIL  searches list contains created"; echo "$LAST_BODY" | head -c 300; echo
+  fi
+  check "manage: run search -> 200" 200 -H "$AUTH" "$BASE/search/$SKEY/items"
+  if echo "$LAST_BODY" | "$PY" -c "import sys,json;d=json.load(sys.stdin);assert d.get('total',0)>=1,d" 2>/dev/null; then
+    PASS=$((PASS+1)); echo "PASS  run search finds tagged items"
+  else
+    FAIL=$((FAIL+1)); echo "FAIL  run search finds tagged items"; echo "$LAST_BODY" | head -c 300; echo
+  fi
+  check "manage: rename search -> 200" 200 -X POST -H "$AUTH" -H "Content-Type: application/json" \
+    -d '{"name":"zotero-agent-mcp-e2e-search-2"}' "$BASE/search/$SKEY/update"
+  check "manage: delete search -> 200" 200 -X POST -H "$AUTH" -H "Content-Type: application/json" \
+    -d '{}' "$BASE/search/$SKEY/delete"
+
+  # ---- schema & versions ----
+  check "manage: schema all types -> 200" 200 -H "$AUTH" "$BASE/schema"
+  check "manage: schema journalArticle -> 200" 200 -H "$AUTH" "$BASE/schema?itemType=journalArticle"
+  if echo "$LAST_BODY" | "$PY" -c "import sys,json;d=json.load(sys.stdin);fs=[f['field'] for f in d.get('fields',[])];assert 'publicationTitle' in fs and 'volume' in fs and any(c.get('creatorType')=='author' for c in d.get('creatorTypes',[])),d" 2>/dev/null; then
+    PASS=$((PASS+1)); echo "PASS  schema fields+creatorTypes"
+  else
+    FAIL=$((FAIL+1)); echo "FAIL  schema fields+creatorTypes"; echo "$LAST_BODY" | head -c 400; echo
+  fi
+  check "manage: versions items -> 200" 200 -H "$AUTH" "$BASE/versions?type=items&since=0"
+  if echo "$LAST_BODY" | "$PY" -c "import sys,json;d=json.load(sys.stdin);assert isinstance(d.get('libraryVersion'),int) and isinstance(d.get('versions'),dict),d" 2>/dev/null; then
+    PASS=$((PASS+1)); echo "PASS  versions payload shape"
+  else
+    FAIL=$((FAIL+1)); echo "FAIL  versions payload shape"; echo "$LAST_BODY" | head -c 300; echo
+  fi
+  check "manage: versions bad type -> 400" 400 -H "$AUTH" "$BASE/versions?type=nope"
+
+  # ---- negative cases ----
+  check "manage: update unknown item -> 404" 404 -X POST -H "$AUTH" -H "Content-Type: application/json" \
+    -d '{"fields":{"date":"2020"}}' "$BASE/item/ZZZZZZZZ/update"
+  check "manage: create collection no name -> 400" 400 -X POST -H "$AUTH" -H "Content-Type: application/json" \
+    -d '{}' "$BASE/collection"
+  check "manage: create search no conditions -> 400" 400 -X POST -H "$AUTH" -H "Content-Type: application/json" \
+    -d '{"name":"x"}' "$BASE/searches"
+
+  # ---- cleanup ----
+  check "manage: delete manage collection permanent -> 200" 200 -X POST -H "$AUTH" -H "Content-Type: application/json" \
+    -d '{"permanent":true}' "$BASE/collection/$MCOLL/delete"
+else
+  echo "SKIP  manage cases (set MANAGE_TEST=1)"
 fi
 
 echo
