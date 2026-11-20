@@ -61,7 +61,7 @@
     const t = String(P("token") || "");
     const u = baseUrl();
     const urlFlag = u !== "http://127.0.0.1:23119/zotero-agent-mcp" ? ` --url ${u}` : "";
-    return `npx -y github:JingYangYuan/zotero-agent-mcp --token ${t}${urlFlag}`;
+    return `npx -y zotero-agent-mcp --token ${t}${urlFlag}`;
   }
 
   function curlExample() {

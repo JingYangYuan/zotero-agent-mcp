@@ -695,7 +695,7 @@ var AgentMCP = new function () {
     // convenience config file
     let cfg = {
       _comment: "Paste the 'mcpServers' block into your agent's MCP config. Works with ZCode, Claude Desktop/Code, Cursor, etc.",
-      geminiAppCommand: `npx -y github:JingYangYuan/zotero-agent-mcp --token ${getPref("token")}`,
+      geminiAppCommand: `npx -y zotero-agent-mcp --token ${getPref("token")}`,
       url: `http://127.0.0.1:23119/zotero-agent-mcp`,
       token: getPref("token"),
       bridge: dest,
