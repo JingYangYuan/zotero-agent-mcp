@@ -1,6 +1,6 @@
 # Zotero-Agent-MCP
 
-让本地 AI agent（ZCode / Claude Code / Cursor / 任意脚本）**快速、安全地读写 Zotero** 的插件。
+让本地 AI agent（各类支持 MCP 的客户端或任意脚本）**快速、安全地读写 Zotero** 的插件。
 在 Zotero 内置 HTTP 服务（127.0.0.1:23119）上注册 `/zotero-agent-mcp/` API，并提供**零依赖 MCP 桥（34 个工具）**与**内置 agent 路由 skill**。
 插件在进程内直调 Zotero 内部 API，**能力是 Zotero 本地 API 的超集**——agent 无需再绕行 `/api/**`。
 **所有功能默认开放**，同时保留令牌鉴权、作用域开关、库白名单、速率限制与审计日志可随时收紧。
@@ -59,7 +59,7 @@
 
 ## 接入 AI agent（两种方式）
 
-### 方式 A：MCP（推荐，ZCode / Claude / Cursor 通用）
+### 方式 A：MCP（推荐，通用 stdio 协议）
 插件已把桥和现成配置释放到 `~/Zotero/zotero-agent-mcp/`。设置面板点"复制 MCP 配置 JSON"，或直接把
 `~/Zotero/zotero-agent-mcp/zotero-agent-mcp.mcp.json` 里的 `mcpServers` 块粘贴进 agent 的 MCP 配置：
 
@@ -79,24 +79,21 @@
 }
 ```
 
-### 方式 A-2：Gemini App（macOS 本地 MCP / `npx`，推荐）
-已发布至 npm（[`zotero-agent-mcp`](https://www.npmjs.com/package/zotero-agent-mcp)），Gemini App 的「本地 MCP」只需一条 `npx` 命令，且**原生支持默认沙盒模式**（无需配置环境变量或开放全盘权限）：
+### 方式 A-2：`npx` 单命令接入（推荐，兼容沙盒环境）
+已发布至 npm（[`zotero-agent-mcp`](https://www.npmjs.com/package/zotero-agent-mcp)），对于仅支持单行命令或运行在默认沙盒下的 MCP 客户端，只需一条 `npx` 命令即可启动（无需配置环境变量或开放全盘文件权限）：
 
-1. 确保 Zotero 已启动且安装了本插件；在 Zotero 设置 → **Zotero-Agent-MCP** 面板点击 **复制 Gemini App 命令**（或复制访问令牌自行拼接）：
+1. 确保 Zotero 已启动且安装了本插件；在 Zotero 设置 → **Zotero-Agent-MCP** 面板点击复制单行命令（或复制访问令牌自行拼接）：
    ```bash
    npx -y zotero-agent-mcp --token <你的令牌>
    ```
    > 备选：也可直接从 GitHub 拉取运行 `npx -y github:JingYangYuan/zotero-agent-mcp --token <你的令牌>`；若修改过 Zotero 端口，可追加 `--url http://127.0.0.1:<端口>/zotero-agent-mcp`。
 
-2. 打开 **Gemini App** → 设置 → 自定义应用 → **添加自定义应用** → 选择 **本地 MCP**：
+2. 在客户端的本地 MCP 配置中填入：
    - **服务器 ID**：`zotero-agent`
-   - **服务器名称**：`Zotero Agent`
-   - **命令**：粘贴上面复制的 `npx -y zotero-agent-mcp --token <你的令牌>`
-   - **沙盒设置**：保持**默认**即可（默认沙盒允许访问 `~/.npm` 缓存与出站网络 `127.0.0.1:23119`）。
+   - **命令**：`npx -y zotero-agent-mcp --token <你的令牌>`
+   - **沙盒设置**：保持默认即可（仅需访问 `~/.npm` 缓存与本地回环网络 `127.0.0.1:23119`）。
 
-3. 在 Gemini App 对话中使用：在**任务模式**下，或在新对话中输入 `@Zotero Agent` 即可调用全部 34 个 Zotero 工具。
-
-> 提示：同一条 `npx` 命令也适用于 **Gemini CLI**（`~/.gemini/settings.json`）、**Claude Desktop**、**Cursor** 等支持 `stdio` MCP 的客户端：
+> 若客户端使用 JSON 配置文件，也可按如下格式填写：
 > ```json
 > {
 >   "mcpServers": {
@@ -128,13 +125,13 @@ curl -X POST -H "Authorization: Bearer <令牌>" -H "Content-Type: application/j
   http://127.0.0.1:23119/zotero-agent-mcp/item/<KEY>/collections
 ```
 
-### 方式 C：内置 agent 路由 skill（推荐给 ZCode）
+### 方式 C：内置 agent 路由 skill
 
 插件把路由 skill 释放到数据目录 `zotero-agent-mcp/skill/SKILL.md`，内容是"一切 Zotero 操作走
-zotero-agent MCP、禁止直调本地 API"的路由铁律 + 34 工具映射表 + 旧工具名对照。装进 ZCode：
+zotero-agent MCP、禁止直调本地 API"的路由铁律 + 34 工具映射表 + 旧工具名对照。安装到支持 Skills 的 agent：
 
 ```bash
-tools/install-skill.sh   # 自动定位数据目录，junction 到 ~/.zcode/skills/zotero-agent
+tools/install-skill.sh   # 自动定位数据目录，junction 到 agent 的 skills 目录
 ```
 
 更新插件即自动更新 skill（junction 指向释放目录）。
@@ -156,7 +153,7 @@ tools/build.sh     构建 xpi（含把桥和 skill 打进插件的 bridge-source
 tools/test_api.sh  HTTP 全端点测试（含鉴权负例；RUN_NOTE_TEST/CREATE_ITEM_TEST/SET_COLLECTIONS_TEST/MANAGE_TEST 控制写库用例）
 tools/test_bridge.mjs  MCP 桥 E2E（initialize/tools/list/全部 34 工具）
 tools/authorize_localapi.sh  一次性本地 API 写授权（供测试播种集合，key 缓存 tools/.localapi-key）
-tools/install-skill.sh  把插件释放的路由 skill 装进 ~/.zcode/skills（junction）
+tools/install-skill.sh  把插件释放的路由 skill 挂载到 agent skills 目录（junction）
 DESIGN.md          grillme 自问自答设计文档 + 验收矩阵
 ```
 
