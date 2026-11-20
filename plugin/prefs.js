@@ -57,6 +57,13 @@
     );
   }
 
+  function geminiCommand() {
+    const t = String(P("token") || "");
+    const u = baseUrl();
+    const urlFlag = u !== "http://127.0.0.1:23119/zotero-agent-mcp" ? ` --url ${u}` : "";
+    return `npx -y github:JingYangYuan/zotero-agent-mcp --token ${t}${urlFlag}`;
+  }
+
   function curlExample() {
     const t = String(P("token") || "");
     const u = baseUrl();
@@ -177,6 +184,7 @@
 
     // Integration buttons
     $("ab-copy-mcp")?.addEventListener("command", () => copyText(mcpConfig()));
+    $("ab-copy-gemini")?.addEventListener("command", () => copyText(geminiCommand()));
     $("ab-copy-curl")?.addEventListener("command", () => copyText(curlExample()));
     $("ab-open-bridge")?.addEventListener("command", () => {
       try {

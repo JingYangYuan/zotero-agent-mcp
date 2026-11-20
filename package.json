@@ -1,0 +1,29 @@
+{
+  "name": "zotero-agent-mcp",
+  "version": "0.5.1",
+  "description": "Zero-dependency MCP bridge for Zotero-Agent-MCP (works with Gemini App, Claude, Cursor, ZCode)",
+  "type": "module",
+  "bin": {
+    "zotero-agent-mcp": "bridge/zotero-agent-mcp.mjs"
+  },
+  "files": [
+    "bridge/zotero-agent-mcp.mjs",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/JingYangYuan/zotero-agent-mcp.git"
+  },
+  "keywords": [
+    "zotero",
+    "mcp",
+    "model-context-protocol",
+    "gemini",
+    "claude",
+    "cursor"
+  ],
+  "license": "MIT"
+}

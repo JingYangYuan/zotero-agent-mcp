@@ -2,19 +2,78 @@
 /* zotero-agent MCP bridge — zero-dependency Model Context Protocol server over stdio.
  * Released by "Zotero-Agent-MCP" to <Zotero data dir>/zotero-agent-mcp/zotero-agent-mcp.mjs.
  *
- * Config (env):
- *   ZOTERO_AGENT_URL   default http://127.0.0.1:23119/zotero-agent-mcp
- *   ZOTERO_AGENT_TOKEN bearer token from Zotero Settings → AgentMCP
+ * Config (CLI args or env):
+ *   --token / -t       or ZOTERO_AGENT_TOKEN (bearer token from Zotero Settings → AgentMCP;
+ *                      falls back to ~/Zotero/zotero-agent-mcp/token when readable)
+ *   --url / -u         or ZOTERO_AGENT_URL (default http://127.0.0.1:23119/zotero-agent-mcp)
  *
  * Protocol: newline-delimited JSON-RPC 2.0 (MCP stdio transport).
  * All diagnostics go to stderr; stdout carries only protocol messages.
  */
 
 import readline from "node:readline";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
-const BASE_URL = (process.env.ZOTERO_AGENT_URL || "http://127.0.0.1:23119/zotero-agent-mcp").replace(/\/+$/, "");
-const TOKEN = process.env.ZOTERO_AGENT_TOKEN || "";
-const VERSION = "0.5.0";
+const VERSION = "0.5.1";
+
+function parseArgs(argv) {
+  const opts = { token: "", url: "", help: false, version: false };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === "--help" || a === "-h") {
+      opts.help = true;
+    } else if (a === "--version" || a === "-v") {
+      opts.version = true;
+    } else if (a === "--token" || a === "-t") {
+      if (i + 1 < argv.length) opts.token = argv[++i];
+    } else if (a.startsWith("--token=")) {
+      opts.token = a.slice("--token=".length);
+    } else if (a === "--url" || a === "-u") {
+      if (i + 1 < argv.length) opts.url = argv[++i];
+    } else if (a.startsWith("--url=")) {
+      opts.url = a.slice("--url=".length);
+    }
+  }
+  return opts;
+}
+
+function readFallbackToken() {
+  try {
+    const p = path.join(os.homedir(), "Zotero", "zotero-agent-mcp", "token");
+    return fs.readFileSync(p, "utf8").trim();
+  } catch {
+    return "";
+  }
+}
+
+const CLI = parseArgs(process.argv.slice(2));
+if (CLI.version) {
+  process.stdout.write(`zotero-agent-mcp ${VERSION}\n`);
+  process.exit(0);
+}
+if (CLI.help) {
+  process.stdout.write(
+    [
+      `zotero-agent-mcp v${VERSION} — MCP stdio bridge for Zotero-Agent-MCP`,
+      ``,
+      `Usage:`,
+      `  zotero-agent-mcp [--token <TOKEN>] [--url <URL>]`,
+      `  npx -y github:JingYangYuan/zotero-agent-mcp --token <TOKEN>`,
+      ``,
+      `Options:`,
+      `  -t, --token <TOKEN>  Bearer token from Zotero Settings (or env ZOTERO_AGENT_TOKEN)`,
+      `  -u, --url <URL>      Plugin base URL (default: http://127.0.0.1:23119/zotero-agent-mcp)`,
+      `  -v, --version        Print version and exit`,
+      `  -h, --help           Show this help and exit`,
+    ].join("\n") + "\n"
+  );
+  process.exit(0);
+}
+
+const BASE_URL = (CLI.url || process.env.ZOTERO_AGENT_URL || "http://127.0.0.1:23119/zotero-agent-mcp").replace(/\/+$/, "");
+const TOKEN = CLI.token || process.env.ZOTERO_AGENT_TOKEN || readFallbackToken();
 
 function log(msg) {
   process.stderr.write(`[zotero-agent-mcp] ${msg}\n`);

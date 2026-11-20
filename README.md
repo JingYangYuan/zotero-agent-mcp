@@ -79,6 +79,20 @@
 }
 ```
 
+### 方式 A-2：Gemini App（macOS 本地 MCP / `npx`）
+Gemini App 的「本地 MCP」仅需一条 `npx` 命令，且支持**默认沙盒模式**（无需手动配置环境变量或开放全盘权限）：
+
+1. 在 Zotero 设置 → **Zotero-Agent-MCP** 面板点击 **复制 Gemini App 命令**（或手动拼接令牌）：
+   ```bash
+   npx -y github:JingYangYuan/zotero-agent-mcp --token <你的令牌>
+   ```
+   > 若后续已发布至 npm，也可使用更短的 `npx -y zotero-agent-mcp --token <你的令牌>`。
+2. 在 Gemini App → 设置 → 自定义应用 → **添加自定义应用** → **本地 MCP** 中填入：
+   - **服务器 ID**：`zotero-agent`
+   - **服务器名称**：`Zotero Agent`
+   - **命令**：粘贴上述 `npx -y ...` 命令
+   - 沙盒设置保持**默认**（允许访问 `~/.npm` 缓存与出站网络 `127.0.0.1:23119`）即可。
+
 ### 方式 B：直接 HTTP
 ```bash
 curl http://127.0.0.1:23119/zotero-agent-mcp/ping
