@@ -186,5 +186,6 @@ DESIGN.md          grillme 自问自答设计文档 + 验收矩阵
 
 - **安装提示不兼容/损坏**：确认 manifest 有 `update_url`、`strict_max_version` 为 `10.*`。
 - **agent 连不上**：先 `curl .../ping`（无需令牌）；再确认设置面板"启用"已勾选、令牌一致。
+- **`npx` 启动握手超时 / 审计日志无新请求记录**：使用 `npx -y github:...` 每次都会拉取远端仓库（无代理环境下耗时可达 ~20 秒），而裸用 `npx -y zotero-agent-mcp` 默认也会每次联网校验元数据（~4 秒），网络抖动时易导致 MCP 客户端握手超时。请统一使用 `npx --prefer-offline -y zotero-agent-mcp --token <令牌>`（命中 `~/.npm` 缓存约 0.5 秒秒开，未缓存时自动联网下载）。若 macOS GUI 客户端提示找不到 `npx`（未继承终端 `PATH`），可将 `npx` 替换为绝对路径（如 `/usr/local/bin/npx` 或 `/opt/homebrew/bin/npx`）。
 - **工具报 scope_disabled**：到设置 → Zotero-Agent-MCP 打开对应开关（默认全开，一般不会遇到）。
 - **401**：令牌错误；在面板重新复制。
