@@ -84,13 +84,13 @@
 
 1. 确保 Zotero 已启动且安装了本插件；在 Zotero 设置 → **Zotero-Agent-MCP** 面板点击复制单行命令（或复制访问令牌自行拼接）：
    ```bash
-   npx -y zotero-agent-mcp --token <你的令牌>
+   npx --prefer-offline -y zotero-agent-mcp --token <你的令牌>
    ```
-   > 备选：也可直接从 GitHub 拉取运行 `npx -y github:JingYangYuan/zotero-agent-mcp --token <你的令牌>`；若修改过 Zotero 端口，可追加 `--url http://127.0.0.1:<端口>/zotero-agent-mcp`。
+   > 说明：`--prefer-offline` 会在首次下载缓存后优先从 `~/.npm` 本地启动（约 0.5 秒），避免每次启动联网查询导致 MCP 客户端握手超时；若修改过 Zotero 端口，可追加 `--url http://127.0.0.1:<端口>/zotero-agent-mcp`。
 
 2. 在客户端的本地 MCP 配置中填入：
    - **服务器 ID**：`zotero-agent`
-   - **命令**：`npx -y zotero-agent-mcp --token <你的令牌>`
+   - **命令**：`npx --prefer-offline -y zotero-agent-mcp --token <你的令牌>`
    - **沙盒设置**：保持默认即可（仅需访问 `~/.npm` 缓存与本地回环网络 `127.0.0.1:23119`）。
 
 > 若客户端使用 JSON 配置文件，也可按如下格式填写：
@@ -99,7 +99,7 @@
 >   "mcpServers": {
 >     "zotero-agent": {
 >       "command": "npx",
->       "args": ["-y", "zotero-agent-mcp", "--token", "<你的令牌>"]
+>       "args": ["--prefer-offline", "-y", "zotero-agent-mcp", "--token", "<你的令牌>"]
 >     }
 >   }
 > }
