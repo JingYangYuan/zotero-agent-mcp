@@ -1,0 +1,22 @@
+{
+  "bridge": "/Users/yjy/Documents/zotero-agent-mcp/bridge/zotero-agent-mcp.mjs",
+  "node": "v24.14.1",
+  "runs": 5,
+  "failures": 0,
+  "tools": 34,
+  "toolsListBytes": 20619,
+  "initBytes": 153,
+  "handshakeMs": {
+    "p50": 26,
+    "p95": 35.93,
+    "min": 25.47
+  },
+  "time": "2026-11-23T07:24:37.273Z",
+  "xpiBytes": 38723,
+  "pluginLines": {
+    "plugin/zotero-agent-mcp.js": 1735,
+    "plugin/prefs.xhtml": 122,
+    "plugin/prefs.js": 207,
+    "bridge/zotero-agent-mcp.mjs": 806
+  }
+}

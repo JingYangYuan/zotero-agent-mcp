@@ -136,3 +136,44 @@ MCP stdio 传输 = 按行分隔的 JSON-RPC 2.0，手写 300 行 Node 脚本（�
 - jasminum 1.1.39（本机已适配 Zotero 10 的 bootstrap 插件样板）
 - MCP 规范 stdio 传输（按行分隔 JSON-RPC 2.0）
 - 本机已有 `zotero-mcp-server`（直读 SQLite 方案，作为反面参照与结果交叉验证）
+
+---
+
+## 4. v0.6.0：性能 / 视觉 / 接入自动化（2026-11）
+
+### 4.1 启动与连接：把 IO 挪出启动路径
+- **Q：启动慢在哪？** 实测服务端单次请求 0–1ms，插件启动本身也不重；真正的浪费是「每次启动都重写 4 个文件」+「请求可能撞上令牌对账」。
+  → 启动拆成同步段（`seedDefaults` + 34 条路由 + 偏好面板注册，毫秒级）与延迟维护段（`migrateOldBranding`、令牌对账、文件释放、审计轮转）。
+- **Q：异步维护会不会让首个请求 401？** 会。→ 模块级 `readyPromise`，`handle()` 首行 await；同步段先种一个令牌保证「对账前也自洽」。
+- **Q：什么时候还需要写文件？** 只有内容变化时。→ `writeIfChanged()` 逐文件比对；正常启动零写入（`version.txt`/`mcp.json`/桥/ skill / clients.json / agent-configs.json 都走这条）。
+- **Q：客户端侧为什么慢 4 秒？** `npx -y` 每次解析包元数据。→ 生成配置的默认变体改为**本地 node 直启**（25ms），保留 npx 变体开关给沙盒客户端。
+- **Q：模型上下文也被占了 2–3k token？** `tools/list` 20.6KB → 12.1KB（58.8%）：描述压到一句话（≤62 字符）、公共参数对象复用、删 `additionalProperties:false`、`tools/list` 结果启动时序列化一次、响应去 pretty-print、新增 `--tools=core`（13 工具 / 5.4KB）。
+
+### 4.2 偏好面板的三个 Gecko/Zotero 陷阱
+1. **pane 脚本先于 XHTML 片段加载**：`Zotero.PreferencePanes.register({scripts})` 的脚本在 `_loadPane()` 里先 `loadSubScript`，再解析插入标记。→ 旧代码用 50ms 轮询；现在用 `MutationObserver` 等 `#ab-enabled` 出现，零延迟、无空转。
+2. **片段里的相对 URL 是相对 Zotero 的 prefs 文档**，不是插件 jar。→ 面板 logo 由 JS 用 `rootURI + "icons/prefs-64.png"` 赋值；侧栏图标走 `register({image})`。
+3. **XUL `disabled` 是「属性存在即禁用」**，`setAttribute("disabled","false")` 反而会禁用。→ 统一 `setBusy()`（set/removeAttribute）。
+
+### 4.3 Zotero 10（Firefox 140）兼容性修正
+- `Services.env` 已被移除（`nsIEnvironment` 不在构建里）。HOME 解析改为 `chrome://zotero/content/osfile.mjs` → `FileUtils.getDir("Home")` → `Services.dirsvc` → `PathUtils.homeDir` → `OS.Constants` 逐级回退。
+- `PathUtils.join` 对多段相对组件会抛 `NS_ERROR_FILE_UNRECOGNIZED_PATH`。→ `joinPath()` 逐段 `PathUtils.join`，失败退化为字符串拼接（`expandPath`、node 探测、AppData 路径都走它）。
+- `Subprocess.call` 不做 PATH 解析（只认可执行文件路径）。→ `systemTool()` 用绝对路径探测 `/bin/ln`、`/usr/bin/rm`；探测不到就退化为「复制 SKILL.md」。
+
+### 4.4 接入自动化：直接写入 + 可撤销
+- **Q：怎么把配置真正打进各客户端？** 各家格式不同（`mcpServers` / `servers` / `mcp` / `mcp.servers` / TOML）。→ 写一个**文本级合并器**：定位容器对象后只增改 `zotero-agent` 这一条，其余字节原样保留（`~/.claude.json` 3.7MB 只多出 326 字节，顶层键序不变）；TOML 按 `[mcp_servers.zotero-agent]`(+ `.env`) 段替换，其它段不动。
+- **Q：写坏了怎么办？** 写入前 `<file>.zotero-agent-mcp.bak` 只备份一次（保留"未接入"原始态）；写入是临时文件 + rename 的原子替换；合并后先 `JSON.parse` 校验，失败即放弃；高级里有「撤销全部接入」与逐行「撤销」。
+- **Q：什么时候写？** 插件启动、点「全部接入/更新」、重置令牌后自动跑一遍；已同步时不产生写入（幂等，重启后客户端配置 mtime 不变）。「启动时自动同步」开关可关。
+- **Q：怎么判断「已接入」？** 读配置找 `zotero-agent` 条目（JSON；>4MB 或解析失败时退化为正则），再比对条目里的 `ZOTERO_AGENT_TOKEN` 与当前令牌 → 不同则标记「令牌不同」。
+- **Q：可扩展性？** 内置 `plugin/clients.json`（构建期内嵌 `clients-source.js`，同时释放到数据目录供用户复制），用户可用 `clients.local.json` 按 `id` 覆盖/追加。
+- **Q：唯一的外部写入是什么？** 路由 skill 安装：macOS/Linux `ln -s`（失败复制），Windows 复制；清单写在 `<数据目录>/zotero-agent-mcp/skills-installed.json`，撤销只删清单里记录、且内容/链接仍属于自己的那一份。
+- **Q：怎么证明「真的能连」？** 桥新增 `--selftest`：一个进程内完成「读令牌 → 请求 /ping → 打印 JSON → 退出」，面板「连接测试」跑它并显示耗时与工具数。面板自身在 chrome 窗口里 `fetch` 会被 Zotero 的请求防护拦掉，所以不再用它做判据。
+
+### 4.5 v0.6.0 验收矩阵（真机 Zotero 10.0.9 macOS）
+1. 构建：`tools/build.sh` 生成 xpi，打印 `tools/list` 体积与握手时间。
+2. HTTP：`test_api.sh` 86/86（含 `/ping` 精简与 `?verbose=1` 断言、写库用例全开）。
+3. MCP：`test_bridge.mjs` 55/55（含体积 ≤60% 基线、描述 ≤90 字符、annotations 齐全、`--tools=core`=13）。
+4. 性能：`bench.mjs` 握手 p50 ≈25ms；`/ping.startupMs` 有值。
+5. 面板：侧栏与品牌图标正常；极简布局 + 高级折叠；令牌掩码；9 个客户端「已接入」；`tools/test_config_merge.mjs` 47/0（含 ~/.claude.json、Codex TOML 的真实文件回归：其它条目不变、幂等、可撤销）。
+6. 连接测试：`MCP 自检 ~80ms，34 个工具`。
+7. skill：安装 6/6（软链）、撤销 6/6、清单清零。
+8. 重启：令牌不变、数据目录文件不被重写（mtime 不变）。

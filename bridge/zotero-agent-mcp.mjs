@@ -6,9 +6,13 @@
  *   --token / -t       or ZOTERO_AGENT_TOKEN (bearer token from Zotero Settings → AgentMCP;
  *                      falls back to ~/Zotero/zotero-agent-mcp/token when readable)
  *   --url / -u         or ZOTERO_AGENT_URL (default http://127.0.0.1:23119/zotero-agent-mcp)
+ *   --tools            or ZOTERO_AGENT_TOOLS: "full" (default, 34 tools) or "core" (13 tools)
  *
  * Protocol: newline-delimited JSON-RPC 2.0 (MCP stdio transport).
  * All diagnostics go to stderr; stdout carries only protocol messages.
+ *
+ * v0.6.0: one-line tool descriptions + MCP annotations (smaller tools/list, ~55% of v0.5.1),
+ * compact JSON responses, tools/list result serialized once at startup.
  */
 
 import readline from "node:readline";
@@ -16,10 +20,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-const VERSION = "0.5.1";
+const VERSION = "0.6.0";
 
 function parseArgs(argv) {
-  const opts = { token: "", url: "", help: false, version: false };
+  const opts = { token: "", url: "", tools: "", help: false, version: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--help" || a === "-h") {
@@ -34,18 +38,27 @@ function parseArgs(argv) {
       if (i + 1 < argv.length) opts.url = argv[++i];
     } else if (a.startsWith("--url=")) {
       opts.url = a.slice("--url=".length);
+    } else if (a === "--tools") {
+      if (i + 1 < argv.length) opts.tools = argv[++i];
+    } else if (a.startsWith("--tools=")) {
+      opts.tools = a.slice("--tools=".length);
     }
   }
   return opts;
 }
 
 function readFallbackToken() {
-  try {
-    const p = path.join(os.homedir(), "Zotero", "zotero-agent-mcp", "token");
-    return fs.readFileSync(p, "utf8").trim();
-  } catch {
-    return "";
+  const candidates = [
+    path.join(os.homedir(), "Zotero", "zotero-agent-mcp", "token"),
+    path.join(os.homedir(), "Documents", "Zotero", "zotero-agent-mcp", "token"),
+  ];
+  for (const p of candidates) {
+    try {
+      const t = fs.readFileSync(p, "utf8").trim();
+      if (t) return t;
+    } catch {}
   }
+  return "";
 }
 
 const CLI = parseArgs(process.argv.slice(2));
@@ -59,12 +72,14 @@ if (CLI.help) {
       `zotero-agent-mcp v${VERSION} — MCP stdio bridge for Zotero-Agent-MCP`,
       ``,
       `Usage:`,
-      `  zotero-agent-mcp [--token <TOKEN>] [--url <URL>]`,
-      `  npx -y github:JingYangYuan/zotero-agent-mcp --token <TOKEN>`,
+      `  zotero-agent-mcp [--token <TOKEN>] [--url <URL>] [--tools full|core]`,
+      `  npx --prefer-offline -y zotero-agent-mcp --token <TOKEN>`,
+      `  zotero-agent-mcp --selftest      # one-shot connectivity check, prints JSON`,
       ``,
       `Options:`,
-      `  -t, --token <TOKEN>  Bearer token from Zotero Settings (or env ZOTERO_AGENT_TOKEN)`,
+      `  -t, --token <TOKEN>  Bearer token from Zotero Settings → Zotero-Agent-MCP (or env ZOTERO_AGENT_TOKEN)`,
       `  -u, --url <URL>      Plugin base URL (default: http://127.0.0.1:23119/zotero-agent-mcp)`,
+      `      --tools <set>    "full" (default, 34 tools) or "core" (13 tools, smaller context)`,
       `  -v, --version        Print version and exit`,
       `  -h, --help           Show this help and exit`,
     ].join("\n") + "\n"
@@ -74,6 +89,7 @@ if (CLI.help) {
 
 const BASE_URL = (CLI.url || process.env.ZOTERO_AGENT_URL || "http://127.0.0.1:23119/zotero-agent-mcp").replace(/\/+$/, "");
 const TOKEN = CLI.token || process.env.ZOTERO_AGENT_TOKEN || readFallbackToken();
+const TOOL_SET = String(CLI.tools || process.env.ZOTERO_AGENT_TOOLS || "full").toLowerCase() === "core" ? "core" : "full";
 
 function log(msg) {
   process.stderr.write(`[zotero-agent-mcp] ${msg}\n`);
@@ -114,469 +130,430 @@ async function api(path, { method = "GET", query = {}, body } = {}) {
   }
   return json;
 }
+// ---------- schema helpers (every byte here lands in the model's context) ----------
+const S = { type: "string" };
+const N = { type: "number" };
+const B = { type: "boolean" };
+const A = { type: "array", items: { type: "string" } };
+const O = { type: "object", additionalProperties: { type: "string" } };
+const CA = { type: "array", items: { type: "object" } };
+const LIB = { type: "string", description: "user|id|all" };
+const KEY = { type: "string", description: "8-char key" };
 
-function str(schema) {
-  return { type: "string", description: schema };
-}
-function num(schema) {
-  return { type: "number", description: schema };
-}
-function bool(schema) {
-  return { type: "boolean", description: schema };
-}
+// MCP annotation defaults are conservative (destructiveHint/openWorldHint default true,
+// readOnlyHint default false), so only the non-default cases are spelled out.
+const RO = { readOnlyHint: true };
+const WD = { destructiveHint: false };
+const DEL = { readOnlyHint: false, destructiveHint: true };
 
-const LIBRARY_PARAM = str("Library: 'user' (default) or numeric libraryID from zotero_libraries");
-
-const TOOLS = [
+const TOOLS_ALL = [
   {
     name: "zotero_ping",
-    description:
-      "Check that the Zotero AgentMCP plugin is reachable. Returns plugin/Zotero versions, enabled permission scopes, and available libraries. Call this first if other zotero tools fail.",
-    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    description: "Check reachability, version, scopes.",
+    annotations: RO,
+    inputSchema: { type: "object", properties: {} },
   },
   {
     name: "zotero_libraries",
-    description: "List available Zotero libraries (personal library + groups) with libraryID, type, name, editability.",
-    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    description: "List libraries (personal+groups).",
+    annotations: RO,
+    inputSchema: { type: "object", properties: {} },
   },
   {
     name: "zotero_collections",
-    description: "List the collection tree of a Zotero library.",
-    inputSchema: {
-      type: "object",
-      properties: { library: LIBRARY_PARAM },
-      additionalProperties: false,
-    },
+    description: "List a library's collection tree.",
+    annotations: RO,
+    inputSchema: { type: "object", properties: { library: LIB } },
   },
   {
     name: "zotero_search",
-    description:
-      "Search Zotero items. Default mode searches titles/creators/year; mode='everything' searches all fields, notes and fulltext. Returns metadata summaries; follow up with zotero_get_item / zotero_get_fulltext / zotero_get_annotations.",
+    description: "Search title/creator/year; everything adds fulltext.",
+    annotations: RO,
     inputSchema: {
       type: "object",
       properties: {
-        query: str("Search text (required)"),
-        library: str("'user', numeric libraryID, or 'all' to search every library"),
-        mode: str("'title' (default, quicksearch title/creator/year) or 'everything'"),
-        tag: str("Filter by exact tag"),
-        item_type: str("Filter by item type, e.g. journalArticle, book"),
-        limit: num("Max results 1-100 (default 25)"),
-        offset: num("Pagination offset"),
+        query: S,
+        library: LIB,
+        mode: { type: "string", description: "title|everything" },
+        tag: S,
+        item_type: { type: "string", description: "e.g. journalArticle" },
+        limit: { type: "number", description: "default 25" },
+        offset: N,
       },
       required: ["query"],
-      additionalProperties: false,
     },
   },
   {
     name: "zotero_recent",
-    description: "List recently modified top-level items in a library.",
-    inputSchema: {
-      type: "object",
-      properties: { library: LIBRARY_PARAM, limit: num("Max results (default 20)") },
-      additionalProperties: false,
-    },
+    description: "Recent modified items.",
+    annotations: RO,
+    inputSchema: { type: "object", properties: { library: LIB, limit: N } },
   },
   {
     name: "zotero_get_item",
-    description:
-      "Get full metadata of one item by key (title, creators, abstract, tags, date, DOI, children summary, best attachment key).",
-    inputSchema: {
-      type: "object",
-      properties: {
-        key: str("8-character Zotero item key, e.g. 'ABCD1234'"),
-        library: LIBRARY_PARAM,
-      },
-      required: ["key"],
-      additionalProperties: false,
-    },
+    description: "Item metadata: creators, tags, children, attachment.",
+    annotations: RO,
+    inputSchema: { type: "object", properties: { key: KEY, library: LIB }, required: ["key"] },
   },
   {
     name: "zotero_get_fulltext",
-    description:
-      "Read the extracted text of an item's attachment (PDF/EPUB/text). Works with a top-level item key (uses its best PDF) or an attachment key. Supports pagination for long documents.",
+    description: "Read attachment text; paginate via offset/max.",
+    annotations: RO,
     inputSchema: {
       type: "object",
       properties: {
-        key: str("Zotero item key (top-level item or attachment)"),
-        library: LIBRARY_PARAM,
-        offset: num("Character offset to start reading (use nextOffset from a previous call)"),
-        max_chars: num("Max characters to return (default 200000)"),
+        key: { type: "string", description: "item/attachment key" },
+        library: LIB,
+        offset: { type: "number", description: "nextOffset from previous call" },
+        max_chars: { type: "number", description: "default 200000" },
       },
       required: ["key"],
-      additionalProperties: false,
     },
   },
   {
     name: "zotero_get_annotations",
-    description: "Get the user's highlights and annotation comments (with colors, pages, comments) for an item.",
-    inputSchema: {
-      type: "object",
-      properties: { key: str("Zotero item key"), library: LIBRARY_PARAM },
-      required: ["key"],
-      additionalProperties: false,
-    },
+    description: "Highlights and annotation comments (color, page, comment).",
+    annotations: RO,
+    inputSchema: { type: "object", properties: { key: KEY, library: LIB }, required: ["key"] },
   },
   {
     name: "zotero_get_children",
-    description: "List child attachments and child notes of an item.",
-    inputSchema: {
-      type: "object",
-      properties: { key: str("Zotero item key"), library: LIBRARY_PARAM },
-      required: ["key"],
-      additionalProperties: false,
-    },
+    description: "List child attachments and child notes.",
+    annotations: RO,
+    inputSchema: { type: "object", properties: { key: KEY, library: LIB }, required: ["key"] },
   },
   {
     name: "zotero_cite",
-    description:
-      "Render a citation/bibliography for an item, or export it in a standard format: formatted bibliography or in-text citation in any installed CSL style (e.g. 'apa', 'chinese-gb7714-2005-numeric'), or a full export format (bibtex, biblatex, ris, csljson, csv, mods, refer, tei, wikipedia, marc).",
+    description: "Format a citation (CSL) or export bibtex/ris/csljson.",
+    annotations: RO,
     inputSchema: {
       type: "object",
       properties: {
-        key: str("Zotero item key"),
-        library: LIBRARY_PARAM,
-        format: str("'bibliography' (default) | 'citation' | 'bibtex' | 'biblatex' | 'ris' | 'csljson' | 'csv' | 'mods' | 'refer' | 'tei' | 'wikipedia' | 'marc'"),
-        style: str("CSL style id, default 'apa'"),
+        key: KEY,
+        library: LIB,
+        format: { type: "string", description: "bibliography (default)|citation|bibtex|ris|csv|…" },
+        style: { type: "string", description: "default apa" },
       },
       required: ["key"],
-      additionalProperties: false,
     },
   },
   {
     name: "zotero_add_item",
-    description:
-      "Create a new Zotero item. Either from a LOCAL file (path is attached; PDF/EPUB/DOCX/TXT/…; mode='import' copies into Zotero storage, mode='link' references the original path) or — since v0.5.0 — WITHOUT a file as pure metadata (omit path; typical for literature ingest). Full bibliographic metadata: fields map + creators + collections + tags in one call. If parentKey is given (requires path), attaches the file to that existing item instead.",
+    description: "Create an item from a file or metadata.",
+    annotations: WD,
     inputSchema: {
       type: "object",
       properties: {
-        path: str("Absolute local file path, e.g. /Users/me/papers/foo.pdf — omit for a pure-metadata item"),
-        title: str("Item title (defaults to the file name without extension)"),
-        item_type: str("Zotero item type, default 'document'; e.g. journalArticle, book, report, thesis"),
-        fields: { type: "object", additionalProperties: { type: "string" }, description: "Zotero field names to values, e.g. {date:'2020', publicationTitle:'社会学研究', abstractNote:'…', DOI:'…', volume, issue, pages, extra} — run zotero_get_schema to see valid fields per type" },
-        creators: { type: "array", items: { type: "object", additionalProperties: true }, description: "Zotero creators, e.g. [{name:'张成刚', creatorType:'author'}] or [{firstName:'Alex J', lastName:'Wood', creatorType:'author'}]" },
-        collections: { type: "array", items: { type: "string" }, description: "Collection keys or exact collection names to file the item into" },
-        tags: { type: "array", items: { type: "string" }, description: "Tags to add to the new item" },
-        mode: str("'import' (default, copy file) or 'link' (attach original path)"),
-        parent_key: str("Attach the file to this existing item instead of creating a new one (requires path)"),
-        library: LIBRARY_PARAM,
-        recognize: bool("Run Zotero's automatic metadata retrieval on the attachment (best effort)"),
+        path: { type: "string", description: "absolute path" },
+        title: S,
+        item_type: { type: "string", description: "default document" },
+        fields: O,
+        creators: CA,
+        collections: A,
+        tags: A,
+        mode: { type: "string", description: "import (default)|link" },
+        parent_key: { type: "string", description: "attach file to this item" },
+        library: LIB,
+        recognize: B,
       },
-      additionalProperties: false,
     },
   },
   {
     name: "zotero_set_item_collections",
-    description:
-      "Change which collections an item belongs to: replace the full membership list (default), add to collections, or remove from collections. Collections are matched by collection key or exact name (nested subcollections included). Requires the plugin's 'write' scope to be enabled in Zotero Settings → AgentMCP.",
+    description: "Replace/add/remove collection membership.",
+    annotations: WD,
     inputSchema: {
       type: "object",
       properties: {
-        key: str("Zotero item key"),
-        collections: { type: "array", items: { type: "string" }, description: "Collection keys or exact collection names; empty array with mode='replace' clears membership" },
-        mode: str("'replace' (default, set the full list), 'add' or 'remove'"),
-        library: LIBRARY_PARAM,
+        key: KEY,
+        collections: { type: "array", items: { type: "string" }, description: "empty+replace clears" },
+        mode: { type: "string", description: "replace (default)|add|remove" },
+        library: LIB,
       },
       required: ["key", "collections"],
-      additionalProperties: false,
     },
   },
   {
     name: "zotero_update_item",
-    description:
-      "Update an existing item's metadata: title, any fields, creators, tags (replaces the full set), collections (replaces the full set; empty array unfiles it), note body (for notes), and trash state (deleted: true/false). Invalid field names are skipped and reported in skippedFields. The optional 'version' is informational only (Zotero assigns versions asynchronously after local saves, so no strict conflict check is possible).",
+    description: "Update metadata, creators, tags, collections, trash.",
+    annotations: WD,
     inputSchema: {
       type: "object",
       properties: {
-        key: str("Zotero item key"),
-        title: str("New title"),
-        fields: { type: "object", additionalProperties: { type: "string" }, description: "Field names to new values, e.g. {date:'2021', volume:'28', pages:'31-40'}" },
-        creators: { type: "array", items: { type: "object", additionalProperties: true }, description: "Full replacement creator list, same format as zotero_add_item" },
-        tags: { type: "array", items: { type: "string" }, description: "Full replacement tag list" },
-        collections: { type: "array", items: { type: "string" }, description: "Full replacement list of collection keys or exact names; [] removes from all collections" },
-        note: str("New note body (only for note items)" ),
-        deleted: bool("true = move to trash, false = restore from trash"),
-        version: num("Version from a prior read, for conflict detection (optional)"),
-        library: LIBRARY_PARAM,
+        key: KEY,
+        title: S,
+        fields: O,
+        creators: CA,
+        tags: A,
+        collections: { type: "array", items: { type: "string" }, description: "[] unfiles" },
+        note: { type: "string", description: "note items only" },
+        deleted: { type: "boolean", description: "true = trash" },
+        version: N,
+        library: LIB,
       },
       required: ["key"],
-      additionalProperties: false,
     },
   },
   {
     name: "zotero_delete_item",
-    description:
-      "Delete an item. By default moves it to the Zotero trash (recoverable via zotero_update_item {deleted: false}); permanent=true erases it for good. Use trash first unless the user explicitly asks for permanent deletion.",
+    description: "Trash an item; permanent=true erases it.",
+    annotations: DEL,
     inputSchema: {
       type: "object",
       properties: {
-        key: str("Zotero item key"),
-        permanent: bool("Skip the trash and erase permanently (default false)"),
-        library: LIBRARY_PARAM,
+        key: KEY,
+        permanent: B,
+        library: LIB,
       },
       required: ["key"],
-      additionalProperties: false,
     },
   },
   {
     name: "zotero_get_trash",
-    description: "List items currently in the trash of a library (most recently deleted first).",
-    inputSchema: {
-      type: "object",
-      properties: { library: LIBRARY_PARAM, limit: num("Max results (default 50)") },
-      additionalProperties: false,
-    },
+    description: "List trashed items.",
+    annotations: RO,
+    inputSchema: { type: "object", properties: { library: LIB, limit: N } },
   },
   {
     name: "zotero_attach_file",
-    description:
-      "Attach a local file (PDF etc.) to an existing item. mode='import' copies the file into Zotero storage (default); mode='link' references the original path.",
+    description: "Attach a local file to an item (import|link).",
+    annotations: WD,
     inputSchema: {
       type: "object",
       properties: {
-        key: str("Zotero item key of the parent item"),
-        path: str("Absolute local file path"),
-        mode: str("'import' (default) or 'link'"),
-        title: str("Attachment title (optional)"),
-        recognize: bool("Run Zotero's automatic metadata retrieval (best effort)"),
-        library: LIBRARY_PARAM,
+        key: { type: "string", description: "parent key" },
+        path: S,
+        mode: { type: "string", description: "import (default)|link" },
+        title: S,
+        recognize: B,
+        library: LIB,
       },
       required: ["key", "path"],
-      additionalProperties: false,
     },
   },
   {
     name: "zotero_get_attachment_path",
-    description: "Get the absolute local filesystem path of an item's attachment (locates the original file on disk).",
-    inputSchema: {
-      type: "object",
-      properties: { key: str("Zotero item key (top-level item or attachment)"), library: LIBRARY_PARAM },
-      required: ["key"],
-      additionalProperties: false,
-    },
+    description: "Local filesystem path of an item's attachment.",
+    annotations: RO,
+    inputSchema: { type: "object", properties: { key: KEY, library: LIB }, required: ["key"] },
   },
   {
     name: "zotero_create_collection",
-    description: "Create a collection, optionally as a subcollection of an existing one (match parent by key or exact name).",
+    description: "Create a collection, optionally nested.",
+    annotations: WD,
     inputSchema: {
       type: "object",
       properties: {
-        name: str("New collection name"),
-        parent: str("Parent collection key or exact name (omit for top level)"),
-        library: LIBRARY_PARAM,
+        name: S,
+        parent: { type: "string", description: "parent key/name; omit for top" },
+        library: LIB,
       },
       required: ["name"],
-      additionalProperties: false,
     },
   },
   {
     name: "zotero_update_collection",
-    description:
-      "Update a collection: rename (name), move under a different parent (parent = key/exact name, or null to move to top level), or trash/restore it (deleted).",
+    description: "Rename, move or trash a collection.",
+    annotations: WD,
     inputSchema: {
       type: "object",
       properties: {
-        key: str("Collection key"),
-        name: str("New name"),
-        parent: { type: ["string", "null"], description: "New parent collection key or exact name; null moves the collection to top level" },
-        deleted: bool("true = trash, false = restore"),
-        library: LIBRARY_PARAM,
+        key: { type: "string", description: "collection key" },
+        name: S,
+        parent: { type: ["string", "null"], description: "null = top level" },
+        deleted: B,
+        library: LIB,
       },
       required: ["key"],
-      additionalProperties: false,
     },
   },
   {
     name: "zotero_delete_collection",
-    description:
-      "Delete a collection. Default moves it to trash; permanent=true erases it (member items are only unfiled, never deleted).",
+    description: "Delete a collection; items only unfiled.",
+    annotations: DEL,
     inputSchema: {
       type: "object",
       properties: {
-        key: str("Collection key"),
-        permanent: bool("Erase permanently instead of trashing (default false)"),
-        library: LIBRARY_PARAM,
+        key: { type: "string", description: "collection key" },
+        permanent: B,
+        library: LIB,
       },
       required: ["key"],
-      additionalProperties: false,
     },
   },
   {
     name: "zotero_search_collections",
-    description: "Search collections by name (substring, case-insensitive). Returns keys with their full parent path — use before zotero_get_collection_items or when filing items.",
-    inputSchema: {
-      type: "object",
-      properties: { query: str("Name fragment to search for"), library: LIBRARY_PARAM },
-      required: ["query"],
-      additionalProperties: false,
-    },
+    description: "Find collections by name.",
+    annotations: RO,
+    inputSchema: { type: "object", properties: { query: S, library: LIB }, required: ["query"] },
   },
   {
     name: "zotero_get_collection_items",
-    description: "List the items in a collection (by collection key or exact name).",
+    description: "List items in a collection.",
+    annotations: RO,
     inputSchema: {
       type: "object",
-      properties: {
-        key: str("Collection key or exact name"),
-        library: LIBRARY_PARAM,
-        limit: num("Max results (default 50)"),
-      },
+      properties: { key: { type: "string", description: "collection key or name" }, library: LIB, limit: N },
       required: ["key"],
-      additionalProperties: false,
     },
   },
   {
     name: "zotero_get_tags",
     description: "List all tags used in a library.",
-    inputSchema: {
-      type: "object",
-      properties: { library: LIBRARY_PARAM },
-      additionalProperties: false,
-    },
+    annotations: RO,
+    inputSchema: { type: "object", properties: { library: LIB } },
   },
   {
     name: "zotero_delete_tags",
-    description:
-      "Delete tags library-wide (removes the tag from every item). Provide exact tag names, max 50 per call.",
+    description: "Remove tags library-wide (max 50 per call).",
+    annotations: DEL,
     inputSchema: {
       type: "object",
-      properties: {
-        tags: { type: "array", items: { type: "string" }, description: "Exact tag names to remove library-wide" },
-        library: LIBRARY_PARAM,
-      },
+      properties: { tags: A, library: LIB },
       required: ["tags"],
-      additionalProperties: false,
     },
   },
   {
     name: "zotero_get_searches",
-    description: "List saved searches in a library (key, name, version).",
-    inputSchema: {
-      type: "object",
-      properties: { library: LIBRARY_PARAM },
-      additionalProperties: false,
-    },
+    description: "List saved searches.",
+    annotations: RO,
+    inputSchema: { type: "object", properties: { library: LIB } },
   },
   {
     name: "zotero_create_search",
-    description:
-      "Create a saved search. Conditions use Zotero search condition/operator/value triples, e.g. {condition:'tag', operator:'is', value:'单位制'} or {condition:'quicksearch-titleCreatorYear', operator:'contains', value:'平台'}. Combine with joinMode any/all via a {condition:'joinMode', operator:'is', value:'any'} condition.",
+    description: "Create a saved search from {condition,operator,value} triples.",
+    annotations: WD,
     inputSchema: {
       type: "object",
       properties: {
-        name: str("Saved search name"),
-        conditions: { type: "array", items: { type: "object", additionalProperties: true }, description: "[{condition, operator, value}]" },
-        library: LIBRARY_PARAM,
+        name: S,
+        conditions: { type: "array", items: { type: "object" }, description: "e.g. {condition,operator,value}" },
+        library: LIB,
       },
       required: ["name", "conditions"],
-      additionalProperties: false,
     },
   },
   {
     name: "zotero_update_search",
-    description: "Update a saved search's name and/or conditions (conditions replace the full list).",
+    description: "Update a saved search's name/conditions.",
+    annotations: WD,
     inputSchema: {
       type: "object",
       properties: {
-        key: str("Saved search key"),
-        name: str("New name"),
-        conditions: { type: "array", items: { type: "object", additionalProperties: true }, description: "Full replacement [{condition, operator, value}]" },
-        library: LIBRARY_PARAM,
+        key: { type: "string", description: "search key" },
+        name: S,
+        conditions: { type: "array", items: { type: "object" }, description: "full replacement" },
+        library: LIB,
       },
       required: ["key"],
-      additionalProperties: false,
     },
   },
   {
     name: "zotero_delete_search",
     description: "Delete a saved search.",
+    annotations: DEL,
     inputSchema: {
       type: "object",
-      properties: { key: str("Saved search key"), library: LIBRARY_PARAM },
+      properties: { key: { type: "string", description: "saved search key" }, library: LIB },
       required: ["key"],
-      additionalProperties: false,
     },
   },
   {
     name: "zotero_run_search",
-    description: "Execute a saved search and return the matching items (a capability even the Zotero web API lacks).",
+    description: "Run a saved search and return matching items.",
+    annotations: RO,
     inputSchema: {
       type: "object",
-      properties: { key: str("Saved search key"), library: LIBRARY_PARAM, limit: num("Max results (default 50)") },
+      properties: { key: { type: "string", description: "saved search key" }, library: LIB, limit: N },
       required: ["key"],
-      additionalProperties: false,
     },
   },
   {
     name: "zotero_get_schema",
-    description:
-      "Introspect valid Zotero field names: with itemType, returns that type's fields and creator types; without, lists all item types. Use before zotero_add_item/zotero_update_item to get field names right (invalid names are silently skipped).",
+    description: "Introspect valid field/creator names.",
+    annotations: RO,
     inputSchema: {
       type: "object",
-      properties: { item_type: str("e.g. journalArticle, book — omit to list all types" ) },
-      additionalProperties: false,
+      properties: { item_type: { type: "string", description: "e.g. journalArticle" } },
     },
   },
   {
     name: "zotero_versions",
-    description:
-      "Incremental sync aid: returns object versions (key → version) for items/collections/searches/fulltext changed since a given version, plus the current library version. Cache across sessions: store libraryVersion, next call pass since=storedValue.",
+    description: "Object versions for incremental sync.",
+    annotations: RO,
     inputSchema: {
       type: "object",
       properties: {
-        type: str("'items' (default) | 'collections' | 'searches' | 'fulltext'"),
-        since: num("Only objects with version greater than this (default 0 = all)"),
-        library: LIBRARY_PARAM,
+        type: { type: "string", description: "items (default)|collections|searches|fulltext" },
+        since: { type: "number", description: "greater than this" },
+        library: LIB,
       },
-      additionalProperties: false,
     },
   },
   {
     name: "zotero_set_fulltext",
-    description:
-      "Write plain-text content into an attachment's full-text index, making it searchable via mode='everything'. Use for text the agent produced or extracted externally (e.g. OCR).",
+    description: "Write text into an attachment's fulltext index.",
+    annotations: WD,
     inputSchema: {
       type: "object",
       properties: {
-        key: str("Zotero item key (top-level item or attachment)"),
-        content: str("Plain text to index"),
-        library: LIBRARY_PARAM,
+        key: { type: "string", description: "item or attachment key" },
+        content: { type: "string", description: "text to index" },
+        library: LIB,
       },
       required: ["key", "content"],
-      additionalProperties: false,
     },
   },
   {
     name: "zotero_add_note",
-    description:
-      "Add a child note to an item (plain text or simple HTML). Requires the plugin's 'write' scope to be enabled in Zotero Settings → AgentMCP.",
+    description: "Add a child note to an item.",
+    annotations: WD,
     inputSchema: {
       type: "object",
       properties: {
-        key: str("Zotero item key of the parent item"),
-        html: str("Note body (text or simple HTML)"),
-        library: LIBRARY_PARAM,
+        key: { type: "string", description: "parent item key" },
+        html: { type: "string", description: "text or simple HTML" },
+        library: LIB,
       },
       required: ["key", "html"],
-      additionalProperties: false,
     },
   },
   {
     name: "zotero_add_tag",
-    description:
-      "Add or remove a tag on an item. Requires the plugin's 'write' scope to be enabled in Zotero Settings → AgentMCP.",
+    description: "Add or remove a single tag on an item.",
+    annotations: WD,
     inputSchema: {
       type: "object",
       properties: {
-        key: str("Zotero item key"),
-        tag: str("Tag text"),
-        action: str("'add' (default) or 'remove'"),
-        library: LIBRARY_PARAM,
+        key: KEY,
+        tag: S,
+        action: { type: "string", description: "add (default)|remove" },
+        library: LIB,
       },
       required: ["key", "tag"],
-      additionalProperties: false,
     },
   },
 ];
+
+const CORE_TOOLS = new Set([
+  "zotero_ping",
+  "zotero_libraries",
+  "zotero_collections",
+  "zotero_search",
+  "zotero_recent",
+  "zotero_get_item",
+  "zotero_get_fulltext",
+  "zotero_get_annotations",
+  "zotero_get_children",
+  "zotero_cite",
+  "zotero_add_item",
+  "zotero_update_item",
+  "zotero_set_item_collections",
+]);
+
+const TOOLS = TOOL_SET === "core" ? TOOLS_ALL.filter((t) => CORE_TOOLS.has(t.name)) : TOOLS_ALL;
+// Serialize once: tools/list is sent on every client connect and must stay cheap.
+const TOOLS_RESULT_JSON = JSON.stringify({ tools: TOOLS });
 
 async function callTool(name, args) {
   args = args || {};
@@ -726,8 +703,9 @@ async function callTool(name, args) {
   }
 }
 
+// Compact JSON: responses are fed straight into a model context, so indentation is pure cost.
 function textContent(obj) {
-  return { content: [{ type: "text", text: typeof obj === "string" ? obj : JSON.stringify(obj, null, 2) }] };
+  return { content: [{ type: "text", text: typeof obj === "string" ? obj : JSON.stringify(obj) }] };
 }
 function errorContent(e) {
   return {
@@ -736,11 +714,45 @@ function errorContent(e) {
   };
 }
 
+function writeRaw(json) {
+  process.stdout.write(json + "\n");
+}
 function respond(id, result) {
-  process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, result }) + "\n");
+  writeRaw(`{"jsonrpc":"2.0","id":${JSON.stringify(id)},"result":${JSON.stringify(result)}}`);
 }
 function respondError(id, code, message) {
-  process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, error: { code, message } }) + "\n");
+  writeRaw(`{"jsonrpc":"2.0","id":${JSON.stringify(id)},"error":${JSON.stringify({ code, message })}}`);
+}
+
+// One-shot connectivity check used by the settings pane's "连接测试" button:
+// verifies node + bridge file + token + the plugin's HTTP surface in one process.
+if (process.argv.slice(2).includes("--selftest")) {
+  const t0 = Date.now();
+  const out = {
+    ok: false,
+    version: VERSION,
+    tools: TOOLS.length,
+    toolSet: TOOL_SET,
+    url: BASE_URL,
+    tokenPresent: !!TOKEN,
+    httpMs: 0,
+    totalMs: 0,
+    error: null,
+  };
+  try {
+    const ping = await api("/ping");
+    out.httpMs = Date.now() - t0;
+    out.ok = !!(ping && ping.plugin === "zotero-agent-mcp");
+    out.enabled = ping ? ping.enabled : null;
+    out.scopes = ping ? ping.scopes : null;
+    out.pluginVersion = ping ? ping.version : null;
+    if (!out.ok) out.error = "unexpected /ping payload";
+  } catch (e) {
+    out.error = String((e && e.message) || e);
+  }
+  out.totalMs = Date.now() - t0;
+  process.stdout.write(JSON.stringify(out) + "\n");
+  process.exit(out.ok ? 0 : 1);
 }
 
 const rl = readline.createInterface({ input: process.stdin, terminal: false });
@@ -773,7 +785,7 @@ rl.on("line", async (line) => {
         respond(id, {});
         break;
       case "tools/list":
-        respond(id, { tools: TOOLS });
+        writeRaw(`{"jsonrpc":"2.0","id":${JSON.stringify(id)},"result":${TOOLS_RESULT_JSON}}`);
         break;
       case "prompts/list":
         respond(id, { prompts: [] });
@@ -802,4 +814,4 @@ rl.on("line", async (line) => {
 });
 
 rl.on("close", () => process.exit(0));
-log(`bridge ready — ${BASE_URL} (token ${TOKEN ? TOKEN.slice(0, 4) + "…" : "MISSING"}, ${TOOLS.length} tools)`);
+log(`bridge ready — ${BASE_URL} (token ${TOKEN ? TOKEN.slice(0, 4) + "…" : "MISSING"}, ${TOOLS.length} tools, set=${TOOL_SET})`);

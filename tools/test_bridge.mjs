@@ -162,6 +162,35 @@ try {
   const names = (tools.result?.tools || []).map((t) => t.name);
   ok(`tools/list has ${N_TOOLS} tools`, names.length === N_TOOLS, `got ${names.length}: ${names.join(",")}`);
 
+  // v0.6.0 context budget: tools/list is paid on every connect.
+  const toolsBytes = Buffer.byteLength(JSON.stringify(tools.result), "utf8");
+  let baseline = null;
+  try {
+    baseline = JSON.parse(readFileSync(path.join(root, "tools", "bench-baseline.json"), "utf8"));
+  } catch {}
+  if (baseline && baseline.toolsListBytes) {
+    const ratio = toolsBytes / baseline.toolsListBytes;
+    ok(
+      `tools/list ≤ 60% of v${baseline.tools || 34}-era baseline (${toolsBytes} vs ${baseline.toolsListBytes} bytes = ${(ratio * 100).toFixed(1)}%)`,
+      ratio <= 0.6,
+      `ratio ${ratio.toFixed(3)}`
+    );
+  } else {
+    console.log(`SKIP  tools/list size check (no tools/bench-baseline.json)`);
+  }
+  const longDesc = (tools.result?.tools || []).filter((t) => (t.description || "").length > 90);
+  ok(
+    "every tool description ≤ 90 chars",
+    longDesc.length === 0,
+    longDesc.map((t) => `${t.name}:${t.description.length}`).join(", ")
+  );
+  const noAnnotations = (tools.result?.tools || []).filter((t) => !t.annotations);
+  ok(
+    "every tool carries MCP annotations",
+    noAnnotations.length === 0,
+    noAnnotations.map((t) => t.name).join(", ")
+  );
+
   const ping = await tool("zotero_ping", {});
   ok("zotero_ping ok", !ping.isError && ping.parsed?.plugin === "zotero-agent-mcp", ping.text?.slice(0, 200));
 
@@ -406,6 +435,36 @@ try {
   ok("protocol ping -> {}", "result" in pingReq);
 
   ok("stderr has startup line", stderrBuf.includes("bridge ready"));
+
+  // v0.6.0: --tools=core exposes the everyday 13-tool subset (smaller context).
+  const coreOut = spawn(process.execPath, [bridgePath, "--tools=core"], { stdio: ["pipe", "pipe", "ignore"] });
+  const coreTools = await new Promise((resolve) => {
+    let buf = "";
+    const timer = setTimeout(() => resolve(null), 10000);
+    coreOut.stdout.on("data", (d) => {
+      buf += d.toString();
+      let idx;
+      while ((idx = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, idx);
+        buf = buf.slice(idx + 1);
+        try {
+          const msg = JSON.parse(line);
+          if (msg.id === 2) {
+            clearTimeout(timer);
+            resolve(msg.result.tools.map((t) => t.name));
+            coreOut.kill();
+          }
+        } catch {}
+      }
+    });
+    coreOut.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }) + "\n");
+    coreOut.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }) + "\n");
+  });
+  ok(
+    "--tools=core exposes 13 tools",
+    Array.isArray(coreTools) && coreTools.length === 13 && coreTools.includes("zotero_get_item"),
+    coreTools ? coreTools.join(",") : "no response"
+  );
 } catch (e) {
   fail++;
   console.log("FATAL", e);

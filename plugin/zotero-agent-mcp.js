@@ -34,12 +34,19 @@ var AgentMCP = new function () {
     allowedLibraries: "",
     rateLimit: 240,
     audit: true,
+    autoSync: true,
   };
 
   let registeredEndpoints = [];
   let bridgeReleasedVersion = null;
   let rl = { windowStart: 0, count: 0 };
   let exportTranslatorCache = new Map();
+  // Resolved once the deferred startup maintenance (token reconciliation, file
+  // release, audit rotation) has finished. Handlers await it so a request that
+  // lands in the first few milliseconds never races the token restore.
+  let readyPromise = Promise.resolve();
+  let nodePathCache;
+  let clientsCache = null;
 
   // ---------- errors ----------
   class ABError extends Error {
@@ -153,7 +160,10 @@ var AgentMCP = new function () {
     let t = randomString(40);
     setPref("token", t);
     IOUtils.writeUTF8(tokenFilePath(), t).catch(() => {});
-    releaseBridgeFiles(); // refresh generated config with new token (fire and forget)
+    // Refresh the released snippets and rewrite every client config with the new token.
+    releaseBridgeFiles()
+      .then(() => AgentMCP.autoSyncClients())
+      .catch((e) => Zotero.logError(e));
     return t;
   };
 
@@ -216,6 +226,17 @@ var AgentMCP = new function () {
       // no file yet
     }
   }
+
+  // Rotating on every launch meant a stat() (and a possible move) on the startup
+  // path. Once a day is plenty for a 5 MB cap.
+  async function maybeRotateAudit() {
+    let last = String(getPref("lastAuditRotate") || "");
+    let today = new Date().toISOString().slice(0, 10);
+    if (last === today) return;
+    await rotateAuditIfHuge();
+    setPref("lastAuditRotate", today);
+  }
+  this.maybeRotateAudit = maybeRotateAudit;
 
   // ---------- auth ----------
   function extractToken(options) {
@@ -654,7 +675,7 @@ var AgentMCP = new function () {
     return Zotero.Items.getAsync(ids);
   }
 
-  // ---------- MCP bridge release ----------
+  // ---------- paths & small file helpers ----------
   function bridgeDir() {
     return PathUtils.join(Zotero.DataDirectory.dir, "zotero-agent-mcp");
   }
@@ -662,60 +683,1026 @@ var AgentMCP = new function () {
   this.bridgePath = function () {
     return PathUtils.join(bridgeDir(), "zotero-agent-mcp.mjs");
   };
+  this.skillPath = function () {
+    return joinPath(bridgeDir(), "skill", "SKILL.md");
+  };
+  function dataFilePath(name) {
+    return PathUtils.join(bridgeDir(), name);
+  }
+  this.dataFilePath = dataFilePath;
 
+  function baseUrl() {
+    let port = 23119;
+    try {
+      port = Zotero.Server.port || 23119;
+    } catch (e) {}
+    return `http://127.0.0.1:${port}${BASE}`;
+  }
+  this.baseUrl = baseUrl;
+
+  async function readTextIfExists(path) {
+    try {
+      return await IOUtils.readUTF8(path);
+    } catch (e) {
+      return null;
+    }
+  }
+  // Every startup used to rewrite the bridge, the skill, the version stamp and the
+  // config file. Comparing first turns that into reads only, so a normal launch
+  // does zero writes in the data directory.
+  async function writeIfChanged(path, content) {
+    let cur = await readTextIfExists(path);
+    if (cur === content) return false;
+    await IOUtils.writeUTF8(path, content);
+    return true;
+  }
+
+  // ---------- child processes (optional capability) ----------
+  let subprocessModule;
+  function getSubprocess() {
+    if (subprocessModule !== undefined) return subprocessModule;
+    subprocessModule = null;
+    try {
+      let m = ChromeUtils.importESModule("resource://gre/modules/Subprocess.sys.mjs");
+      subprocessModule = m.Subprocess || null;
+    } catch (e) {
+      Zotero.debug("AgentMCP: Subprocess module unavailable: " + e);
+    }
+    return subprocessModule;
+  }
+  this.processesAvailable = () => !!getSubprocess();
+
+  async function runProcess(command, args, timeoutMs = 10000) {
+    let Subprocess = getSubprocess();
+    if (!Subprocess) return null;
+    let proc;
+    try {
+      proc = await Subprocess.call({
+        command,
+        arguments: args || [],
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+    } catch (e) {
+      return { code: -1, stdout: "", stderr: String((e && e.message) || e) };
+    }
+    const readPipe = async (pipe) => {
+      if (!pipe) return "";
+      try {
+        if (typeof pipe.readString === "function") return await pipe.readString();
+        if (typeof pipe.read === "function") {
+          let bytes = [];
+          for (;;) {
+            let chunk = await pipe.read();
+            if (!chunk || !chunk.length) break;
+            bytes.push(...chunk);
+          }
+          return new TextDecoder().decode(new Uint8Array(bytes));
+        }
+      } catch (e) {
+        return "";
+      }
+      return "";
+    };
+    let timer = null;
+    let timedOut = false;
+    let work = (async () => {
+      let stdout = await readPipe(proc.stdout);
+      let stderr = await readPipe(proc.stderr);
+      let { exitCode } = await proc.wait();
+      return { code: exitCode, stdout, stderr };
+    })();
+    let guard = new Promise((resolve) => {
+      timer = setTimeout(() => {
+        timedOut = true;
+        resolve({ code: -1, stdout: "", stderr: `timed out after ${timeoutMs}ms` });
+      }, timeoutMs);
+    });
+    let result = await Promise.race([work, guard]);
+    if (timer) clearTimeout(timer);
+    if (timedOut) {
+      try {
+        proc.kill();
+      } catch (e) {}
+    }
+    return result;
+  }
+  this.runProcess = runProcess;
+
+  async function nodePath() {
+    if (nodePathCache !== undefined) return nodePathCache;
+    nodePathCache = "";
+    let exe = Zotero.isWin ? "node.exe" : "node";
+    let dirs = [];
+    // Zotero 10 has no Services.env, so probe the usual install locations instead of PATH.
+    let home = homeDirPath();
+    dirs.push("/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "C:\\Program Files\\nodejs");
+    if (home) {
+      for (let rel of [".local/bin", ".volta/bin", ".bun/bin", ".nvm/current/bin"]) {
+        try {
+          dirs.push(joinPath(home, rel));
+        } catch (e) {}
+      }
+    }
+    for (let dir of dirs) {
+      let candidate;
+      try {
+        candidate = joinPath(dir, exe);
+      } catch (e) {
+        continue;
+      }
+      try {
+        if (await IOUtils.exists(candidate)) {
+          nodePathCache = candidate;
+          break;
+        }
+      } catch (e) {}
+    }
+    if (!nodePathCache) {
+      // Not found — fall back to the bare command name and let the client's PATH resolve it.
+      nodePathCache = Zotero.isWin ? "node.exe" : "node";
+    }
+    return nodePathCache;
+  }
+  this.nodePath = nodePath;
+  this.nodeFound = async () => {
+    let p = await nodePath();
+    try {
+      return await IOUtils.exists(p);
+    } catch (e) {
+      return false;
+    }
+  };
+
+  // ---------- client registry (read-only) ----------
+  // Zotero 10 (Firefox 140) dropped Services.env, and PathUtils.homeDir is not
+  // exposed here, so home detection tries the sources Zotero itself relies on.
+  let homeDirCache;
+  let homeDirSource = "";
+  function homeDirPath() {
+    if (homeDirCache !== undefined) return homeDirCache;
+    let sources = [
+      ["zotero/osfile.mjs", () => ChromeUtils.importESModule("chrome://zotero/content/osfile.mjs").OS.Constants.Path.homeDir],
+      ["FileUtils", () => ChromeUtils.importESModule("resource://gre/modules/FileUtils.sys.mjs").FileUtils.getDir("Home", []).path],
+      ["dirsvc", () => Services.dirsvc.get("Home", Components.interfaces.nsIFile).path],
+      ["PathUtils", () => PathUtils.homeDir],
+      ["OS", () => OS.Constants.Path.homeDir],
+    ];
+    homeDirCache = "";
+    for (let [name, get] of sources) {
+      try {
+        let v = get();
+        if (v) {
+          homeDirCache = String(v).replace(/[\\/]+$/, "");
+          homeDirSource = name;
+          break;
+        }
+      } catch (e) {}
+    }
+    if (!homeDirCache) Zotero.debug("AgentMCP: could not resolve the home directory");
+    return homeDirCache;
+  }
+  this.homeDir = homeDirPath;
+  this.homeDirSource = () => homeDirSource;
+  // Gecko's PathUtils.join throws on some multi-segment components, so append one
+  // segment at a time and fall back to string concatenation.
+  function joinPath(base, ...parts) {
+    let out = String(base || "");
+    for (let part of parts) {
+      for (let seg of String(part).split(/[\\/]+/).filter(Boolean)) {
+        let joined = null;
+        try {
+          joined = PathUtils.join(out, seg);
+        } catch (e) {}
+        if (!joined) joined = out.replace(/[\\/]+$/, "") + (Zotero.isWin ? "\\" : "/") + seg;
+        out = joined;
+      }
+    }
+    return out;
+  }
+  this.joinPath = joinPath;
+
+  function parentDirPath(p) {
+    try {
+      if (typeof PathUtils.parent === "function") return PathUtils.parent(p);
+    } catch (e) {}
+    let norm = String(p).replace(/[\\/]+$/, "");
+    let idx = Math.max(norm.lastIndexOf("/"), norm.lastIndexOf("\\"));
+    return idx > 0 ? norm.slice(0, idx) : norm;
+  }
+
+  function platformKey() {
+    if (Zotero.isWin) return "win32";
+    if (Zotero.isMac) return "darwin";
+    return "linux";
+  }
+  function expandPath(p) {
+    if (!p) return "";
+    let s = String(p).trim();
+    if (s === "~") return homeDirPath();
+    if (s.startsWith("~/")) {
+      let home = homeDirPath();
+      s = home ? joinPath(home, s.slice(2)) : s.slice(2);
+    }
+    s = s.replace(/%([A-Za-z_]+)%/g, (m, name) => {
+      if (/^(HOME|USERPROFILE)$/i.test(name)) return homeDirPath() || m;
+      if (/^APPDATA$/i.test(name)) {
+        let home = homeDirPath();
+        return home ? joinPath(home, "AppData", "Roaming") : m;
+      }
+      if (/^LOCALAPPDATA$/i.test(name)) {
+        let home = homeDirPath();
+        return home ? joinPath(home, "AppData", "Local") : m;
+      }
+      return m;
+    });
+    return s;
+  }
+  this.expandPath = expandPath;
+
+  function parseRegistry(text) {
+    try {
+      let r = JSON.parse(String(text || "{}"));
+      return r && Array.isArray(r.clients) ? r.clients.filter((c) => c && c.id) : [];
+    } catch (e) {
+      Zotero.debug("AgentMCP: clients registry parse failed: " + e);
+      return [];
+    }
+  }
+
+  async function loadClients(force) {
+    if (clientsCache && !force) return clientsCache;
+    let builtin = parseRegistry(AgentMCP._clientsSource || "{}");
+    let localText = await readTextIfExists(dataFilePath("clients.local.json"));
+    let local = localText ? parseRegistry(localText) : [];
+    let map = new Map();
+    for (let c of builtin) map.set(c.id, c);
+    for (let c of local) map.set(c.id, Object.assign({}, map.get(c.id) || {}, c));
+    clientsCache = Array.from(map.values()).map((c) =>
+      Object.assign({ key: "zotero-agent", format: "json-mcpServers", prefer: "node" }, c)
+    );
+    return clientsCache;
+  }
+  this.clients = (force) => loadClients(force);
+
+  function clientPaths(c) {
+    let list = (c.paths && (c.paths[platformKey()] || c.paths.all)) || [];
+    return list.map(expandPath).filter(Boolean);
+  }
+  function clientDetectPaths(c) {
+    let list = c.detectPaths || (c.paths && c.paths[platformKey()]) || [];
+    return list.map(expandPath).filter(Boolean);
+  }
+
+  // Pull the token out of a client entry so stale configs can be flagged.
+  function entryToken(entry) {
+    if (!entry || typeof entry !== "object") return "";
+    let env = (entry.env && entry.env.ZOTERO_AGENT_TOKEN) || (entry.environment && entry.environment.ZOTERO_AGENT_TOKEN) || "";
+    if (env) return String(env);
+    let args = Array.isArray(entry.args) ? entry.args : Array.isArray(entry.command) ? entry.command : [];
+    for (let i = 0; i < args.length; i++) {
+      let a = String(args[i]);
+      if (a === "--token" && args[i + 1]) return String(args[i + 1]);
+      if (a.startsWith("--token=")) return a.slice("--token=".length);
+    }
+    return "";
+  }
+
+  function jsonEntryContainer(doc, format) {
+    if (!doc || typeof doc !== "object") return null;
+    if (format === "json-vscode-servers") return doc.servers || null;
+    if (format === "json-opencode") return doc.mcp || null;
+    // ZCode nests its MCP servers one level deeper: {"mcp": {"servers": {...}}}
+    if (format === "json-zcode") return (doc.mcp && doc.mcp.servers) || null;
+    return doc.mcpServers || null;
+  }
+
+  async function clientStatus(c) {
+    let paths = clientPaths(c);
+    let detect = clientDetectPaths(c);
+    let detected = false;
+    for (let p of detect.concat(paths)) {
+      try {
+        if (await IOUtils.exists(p)) {
+          detected = true;
+          break;
+        }
+      } catch (e) {}
+    }
+    let out = {
+      id: c.id,
+      label: c.label || c.id,
+      note: c.note || "",
+      format: c.format,
+      prefer: c.prefer || "node",
+      skillDir: expandPath(c.skillDir || ""),
+      detected,
+      path: "",
+      pathExists: false,
+      configured: false,
+      tokenMatch: null,
+      error: null,
+    };
+    let existing = null;
+    for (let p of paths) {
+      try {
+        if (await IOUtils.exists(p)) {
+          existing = p;
+          break;
+        }
+      } catch (e) {}
+    }
+    if (!existing) {
+      out.path = paths[0] || "";
+      return out;
+    }
+    out.path = existing;
+    out.pathExists = true;
+    let current = String(getPref("token") || "");
+    try {
+      let stat = await IOUtils.stat(existing);
+      if (stat.size > 4 * 1024 * 1024) {
+        // Very large profiles (~/.claude.json) — avoid a full parse, scan for the key.
+        let text = await IOUtils.readUTF8(existing);
+        out.configured = new RegExp(`"${c.key}"\\s*:`).test(text);
+        return out;
+      }
+      let text = await IOUtils.readUTF8(existing);
+      if (c.format === "toml-codex") {
+        let re = new RegExp(`\\[mcp_servers\\."?${c.key}"?\\]([\\s\\S]*?)(\\n\\[|$)`);
+        let m = re.exec(text);
+        out.configured = !!m;
+        if (m) {
+          let tok = /ZOTERO_AGENT_TOKEN\s*=\s*"([^"]*)"/.exec(m[1]);
+          if (tok) out.tokenMatch = tok[1] === current;
+        }
+        return out;
+      }
+      let doc;
+      try {
+        doc = JSON.parse(text);
+      } catch (e) {
+        out.configured = new RegExp(`"${c.key}"\\s*:`).test(text);
+        out.error = out.configured ? null : "JSON 无法解析";
+        return out;
+      }
+      let container = jsonEntryContainer(doc, c.format);
+      let entry = container ? container[c.key] : null;
+      out.configured = !!entry;
+      if (entry) {
+        let tok = entryToken(entry);
+        if (tok) out.tokenMatch = tok === current;
+      }
+      return out;
+    } catch (e) {
+      out.error = String((e && e.message) || e);
+      return out;
+    }
+  }
+  this.clientStatus = clientStatus;
+
+  async function allClientStatus(force) {
+    let clients = await loadClients(force);
+    let out = [];
+    for (let c of clients) out.push(await clientStatus(c));
+    return out;
+  }
+  this.clientStatuses = allClientStatus;
+
+  // ---------- config snippets ----------
+  async function serverEntry(variant) {
+    let token = String(getPref("token") || "");
+    let url = baseUrl();
+    if (variant === "npx") {
+      let args = ["--prefer-offline", "-y", "zotero-agent-mcp", "--token", token];
+      if (url !== "http://127.0.0.1:23119/zotero-agent-mcp") args.push("--url", url);
+      return { type: "stdio", command: "npx", args, env: {} };
+    }
+    let node = await nodePath();
+    return {
+      type: "stdio",
+      command: node,
+      args: [AgentMCP.bridgePath()],
+      env: { ZOTERO_AGENT_URL: url, ZOTERO_AGENT_TOKEN: token },
+    };
+  }
+  this.serverEntry = serverEntry;
+
+  function tomlSnippet(entry) {
+    let lines = [`[mcp_servers.zotero-agent]`, `command = ${JSON.stringify(entry.command)}`];
+    lines.push(`args = [${entry.args.map((a) => JSON.stringify(a)).join(", ")}]`);
+    lines.push(`startup_timeout_sec = 20`);
+    let env = Object.entries(entry.env || {});
+    if (env.length) {
+      lines.push("", `[mcp_servers.zotero-agent.env]`);
+      for (let [k, v] of env) lines.push(`${k} = ${JSON.stringify(v)}`);
+    }
+    return lines.join("\n");
+  }
+
+  async function clientSnippet(client, variant) {
+    let entry = await serverEntry(variant || client.prefer || "node");
+    if (client.format === "toml-codex") return tomlSnippet(entry);
+    if (client.format === "json-opencode") {
+      let doc = {
+        $schema: "https://opencode.ai/config.json",
+        mcp: {
+          "zotero-agent": {
+            type: "local",
+            command: [entry.command, ...entry.args],
+            environment: entry.env,
+            enabled: true,
+          },
+        },
+      };
+      return JSON.stringify(doc, null, 2);
+    }
+    if (client.format === "json-vscode-servers") {
+      return JSON.stringify({ servers: { "zotero-agent": entry } }, null, 2);
+    }
+    if (client.format === "json-zcode") {
+      return JSON.stringify({ mcp: { servers: { "zotero-agent": entry } } }, null, 2);
+    }
+    return JSON.stringify({ mcpServers: { "zotero-agent": entry } }, null, 2);
+  }
+  this.clientSnippet = clientSnippet;
+
+  // ---------- writing client configs (merge-only, backed up, undoable) ----------
+  // All formats are edited with surgical text splices so host-managed files
+  // (~/.claude.json is multi-MB and rewritten by Claude Code itself) keep their
+  // formatting; we only ever touch the "zotero-agent" entry.
+  function skipWs(text, i) {
+    while (i < text.length && /\s/.test(text[i])) i++;
+    return i;
+  }
+  function scanJsonString(text, i) {
+    if (text[i] !== '"') return -1;
+    i++;
+    while (i < text.length) {
+      if (text[i] === "\\") {
+        i += 2;
+        continue;
+      }
+      if (text[i] === '"') return i + 1;
+      i++;
+    }
+    return -1;
+  }
+  function scanJsonValue(text, i) {
+    i = skipWs(text, i);
+    let ch = text[i];
+    if (ch === '"') return scanJsonString(text, i);
+    if (ch === "{" || ch === "[") {
+      let depth = 0;
+      while (i < text.length) {
+        let c = text[i];
+        if (c === '"') {
+          i = scanJsonString(text, i);
+          if (i < 0) return -1;
+          continue;
+        }
+        if (c === "{" || c === "[") depth++;
+        else if (c === "}" || c === "]") {
+          depth--;
+          if (depth === 0) return i + 1;
+        }
+        i++;
+      }
+      return -1;
+    }
+    while (i < text.length && !/[\s,}\]]/.test(text[i])) i++;
+    return i;
+  }
+  function findMember(text, objStart, key) {
+    let i = skipWs(text, objStart);
+    if (text[i] !== "{") return null;
+    i++;
+    while (i < text.length) {
+      i = skipWs(text, i);
+      if (text[i] === "}") return null;
+      if (text[i] !== '"') return null;
+      let keyStart = i;
+      let keyEnd = scanJsonString(text, i);
+      if (keyEnd < 0) return null;
+      let name;
+      try {
+        name = JSON.parse(text.slice(keyStart, keyEnd));
+      } catch (e) {
+        return null;
+      }
+      i = skipWs(text, keyEnd);
+      if (text[i] !== ":") return null;
+      let valueStart = skipWs(text, i + 1);
+      let valueEnd = scanJsonValue(text, valueStart);
+      if (valueEnd < 0) return null;
+      if (name === key) return { keyStart, keyEnd, valueStart, valueEnd };
+      i = skipWs(text, valueEnd);
+      if (text[i] === ",") {
+        i++;
+        continue;
+      }
+      return null;
+    }
+    return null;
+  }
+  function jsonNodeAt(text, pathKeys) {
+    let node = skipWs(text, 0);
+    if (text[node] !== "{") return -1;
+    for (let k of pathKeys) {
+      let range = findMember(text, node, k);
+      if (!range) return -1;
+      node = skipWs(text, range.valueStart);
+      if (text[node] !== "{") return -1;
+    }
+    return node;
+  }
+  function insertIntoObject(text, objStart, body) {
+    let i = skipWs(text, objStart + 1);
+    let empty = text[i] === "}";
+    let insert = empty ? body : body + ", ";
+    return text.slice(0, i) + insert + text.slice(i);
+  }
+  // Set/replace one entry. Returns the new text, or null when the container is missing.
+  function jsonSetEntry(text, pathKeys, key, valueJson) {
+    let node = jsonNodeAt(text, pathKeys);
+    if (node < 0) return null;
+    let existing = findMember(text, node, key);
+    if (existing) {
+      return text.slice(0, existing.valueStart) + valueJson + text.slice(existing.valueEnd);
+    }
+    return insertIntoObject(text, node, '"' + key + '": ' + valueJson);
+  }
+  // Create a missing container path and put the entry inside it.
+  function jsonCreateEntry(text, pathKeys, key, valueJson) {
+    let root = skipWs(text, 0);
+    if (text[root] !== "{") return null;
+    let value = "{" + JSON.stringify(key) + ": " + valueJson + "}";
+    for (let i = pathKeys.length - 1; i >= 1; i--) {
+      value = "{" + JSON.stringify(pathKeys[i]) + ": " + value + "}";
+    }
+    let member = pathKeys.length ? JSON.stringify(pathKeys[0]) + ": " + value : JSON.stringify(key) + ": " + valueJson;
+    return insertIntoObject(text, root, member);
+  }
+  function jsonRemoveEntry(text, pathKeys, key) {
+    let node = jsonNodeAt(text, pathKeys);
+    if (node < 0) return text;
+    let existing = findMember(text, node, key);
+    if (!existing) return text;
+    let start = existing.keyStart;
+    let end = existing.valueEnd;
+    let after = skipWs(text, end);
+    if (text[after] === ",") {
+      end = skipWs(text, after + 1);
+      return text.slice(0, start) + text.slice(end);
+    }
+    // last member: drop the preceding comma instead
+    let before = start - 1;
+    while (before > node && /\s/.test(text[before])) before--;
+    if (text[before] === ",") start = before;
+    return text.slice(0, start) + text.slice(end);
+  }
+  function isParseableJson(text) {
+    try {
+      JSON.parse(text);
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function tomlHeaderRe(key) {
+    return new RegExp("^\\[mcp_servers\\.\"?" + key.replace(/[.*+?^${}()|[\]\\]/g, "\\  // Ready-to-paste snippets for scripts/CI: one file, rewritten only when it changes.") + "\"?(\\.env)?\\]\\s*$");
+  }
+  function tomlStripSection(text, key) {
+    let headerRe = tomlHeaderRe(key);
+    let kept = [];
+    let skipping = false;
+    for (let line of text.split("\n")) {
+      if (/^\s*\[/.test(line)) {
+        skipping = headerRe.test(line.trim());
+        if (skipping) continue;
+      }
+      if (!skipping) kept.push(line);
+    }
+    return kept.join("\n").replace(/\n{3,}/g, "\n\n");
+  }
+  function tomlSetSection(text, key, entry) {
+    let body = tomlStripSection(text, key).replace(/\s+$/, "");
+    let lines = ["[mcp_servers." + key + "]", "command = " + JSON.stringify(entry.command)];
+    lines.push("args = [" + entry.args.map((a) => JSON.stringify(a)).join(", ") + "]");
+    let env = Object.entries(entry.env || {});
+    if (env.length) {
+      lines.push("startup_timeout_sec = 20", "", "[mcp_servers." + key + ".env]");
+      for (let [k, v] of env) lines.push(k + " = " + JSON.stringify(v));
+    }
+    return (body ? body + "\n\n" : "") + lines.join("\n") + "\n";
+  }
+
+  async function configTargetPath(c) {
+    for (let p of clientPaths(c)) {
+      try {
+        if (await IOUtils.exists(p)) return { path: p, exists: true };
+      } catch (e) {}
+    }
+    for (let p of clientPaths(c)) {
+      try {
+        if (await IOUtils.exists(parentDirPath(p))) return { path: p, exists: false };
+      } catch (e) {}
+    }
+    return null;
+  }
+
+  async function backupOnce(path) {
+    let backup = path + ".zotero-agent-mcp.bak";
+    try {
+      if (await IOUtils.exists(backup)) return backup;
+      if (await IOUtils.exists(path)) await IOUtils.copy(path, backup);
+      return backup;
+    } catch (e) {
+      return "";
+    }
+  }
+
+  async function writeAtomic(path, text) {
+    let tmp = path + ".zotero-agent-mcp.tmp";
+    await IOUtils.writeUTF8(tmp, text);
+    await IOUtils.move(tmp, path);
+  }
+
+  async function entryForClient(c) {
+    let entry = await serverEntry(c.prefer || "node");
+    if (c.format === "json-opencode") {
+      return {
+        type: "local",
+        command: [entry.command, ...entry.args],
+        environment: entry.env,
+        enabled: true,
+      };
+    }
+    return entry;
+  }
+
+  function containerPath(format) {
+    if (format === "json-vscode-servers") return ["servers"];
+    if (format === "json-opencode") return ["mcp"];
+    if (format === "json-zcode") return ["mcp", "servers"];
+    return ["mcpServers"];
+  }
+
+  async function applyClientConfig(c, { remove } = {}) {
+    let target = await configTargetPath(c);
+    if (!target) return { id: c.id, ok: false, error: "客户端目录不存在" };
+    let path = target.path;
+    let original = "";
+    if (target.exists) {
+      try {
+        let stat = await IOUtils.stat(path);
+        if (stat.size > 16 * 1024 * 1024) {
+          return { id: c.id, ok: false, error: "配置文件过大，请手动复制" };
+        }
+        original = await IOUtils.readUTF8(path);
+      } catch (e) {
+        return { id: c.id, ok: false, error: String((e && e.message) || e) };
+      }
+    }
+    let next;
+    try {
+      if (c.format === "toml-codex") {
+        next = remove ? tomlStripSection(original, c.key) : tomlSetSection(original, c.key, await entryForClient(c));
+      } else {
+        let text = original.trim() ? original : "{}";
+        if (!isParseableJson(text)) {
+          return { id: c.id, ok: false, error: "现有配置不是合法 JSON，未改动" };
+        }
+        let keys = containerPath(c.format);
+        if (remove) {
+          next = jsonRemoveEntry(text, keys, c.key);
+        } else {
+          let entryJson = JSON.stringify(await entryForClient(c), null, 2).replace(/\n/g, "\n  ");
+          next = jsonSetEntry(text, keys, c.key, entryJson);
+          if (next === null) next = jsonCreateEntry(text, keys, c.key, entryJson);
+          if (next === null) return { id: c.id, ok: false, error: "无法定位配置根对象" };
+        }
+        if (!isParseableJson(next)) {
+          return { id: c.id, ok: false, error: "合并后 JSON 校验失败，已放弃写入" };
+        }
+      }
+    } catch (e) {
+      return { id: c.id, ok: false, error: String((e && e.message) || e) };
+    }
+    if (next === original) return { id: c.id, ok: true, path, unchanged: true };
+    let backup = "";
+    try {
+      if (target.exists) backup = await backupOnce(path);
+      await writeAtomic(path, next);
+    } catch (e) {
+      return { id: c.id, ok: false, error: "写入失败：" + String((e && e.message) || e) };
+    }
+    return { id: c.id, ok: true, path, backup, removed: !!remove };
+  }
+  this.applyClientConfig = applyClientConfig;
+
+  async function applyAll({ onlyConfigured } = {}) {
+    let clients = await loadClients(true);
+    let results = [];
+    for (let c of clients) {
+      let st = await clientStatus(c);
+      if (!st.pathExists && !st.detected) {
+        results.push({ id: c.id, ok: false, skipped: true, error: "未安装" });
+        continue;
+      }
+      if (onlyConfigured && !st.configured) {
+        results.push({ id: c.id, ok: false, skipped: true });
+        continue;
+      }
+      results.push(await applyClientConfig(c));
+    }
+    return results;
+  }
+  this.applyAllClientConfigs = applyAll;
+
+  async function revertAll() {
+    let clients = await loadClients(true);
+    let results = [];
+    for (let c of clients) {
+      let st = await clientStatus(c);
+      if (!st.configured) continue;
+      results.push(await applyClientConfig(c, { remove: true }));
+    }
+    return results;
+  }
+  this.revertAllClientConfigs = revertAll;
+
+  // Called on startup and after a token change: keeps every detected client in sync.
+  this.autoSyncClients = async function () {
+    if (getPref("autoSync") === false) return [];
+    let results = await applyAll();
+    let changed = results.filter((r) => r.ok && !r.unchanged);
+    if (changed.length) {
+      Zotero.debug("AgentMCP: synced " + changed.length + " client config(s): " + changed.map((r) => r.id).join(", "));
+    }
+    return results;
+  };
+
+  // Ready-to-paste snippets for scripts/CI: one file, rewritten only when it changes.
+  async function releaseAgentConfigs() {
+    let clients = await loadClients();
+    let out = { url: baseUrl(), bridge: AgentMCP.bridgePath(), tokenHint: "full token in each snippet", clients: {} };
+    for (let c of clients) {
+      out.clients[c.id] = {
+        label: c.label || c.id,
+        format: c.format,
+        node: await clientSnippet(c, "node"),
+        npx: await clientSnippet(c, "npx"),
+      };
+    }
+    await writeIfChanged(dataFilePath("agent-configs.json"), JSON.stringify(out, null, 2));
+    return out;
+  }
+  this.releaseAgentConfigs = releaseAgentConfigs;
+
+  // Subprocess.call does not resolve PATH entries, so system tools need absolute paths.
+  const SYSTEM_TOOLS = {
+    ln: ["/bin/ln", "/usr/bin/ln"],
+    rm: ["/bin/rm", "/usr/bin/rm"],
+  };
+  async function systemTool(name) {
+    for (let candidate of SYSTEM_TOOLS[name] || []) {
+      try {
+        if (await IOUtils.exists(candidate)) return candidate;
+      } catch (e) {}
+    }
+    return "";
+  }
+
+  // ---------- skill install / undo (the only place the plugin writes outside its data dir) ----------
+  const SKILL_MANIFEST = "skills-installed.json";
+
+  async function readManifest() {
+    let text = await readTextIfExists(dataFilePath(SKILL_MANIFEST));
+    try {
+      let m = JSON.parse(text || "{}");
+      return m && typeof m === "object" && m.entries ? m : { version: 1, entries: {} };
+    } catch (e) {
+      return { version: 1, entries: {} };
+    }
+  }
+  async function writeManifest(m) {
+    await writeIfChanged(dataFilePath(SKILL_MANIFEST), JSON.stringify(m, null, 2));
+  }
+
+  async function skillTargets() {
+    let clients = await loadClients();
+    let out = [];
+    for (let c of clients) {
+      let dir = expandPath(c.skillDir || "");
+      if (!dir) continue;
+      let parent = parentDirPath(dir);
+      let parentExists = false;
+      try {
+        parentExists = await IOUtils.exists(parent);
+      } catch (e) {}
+      out.push({ id: c.id, label: c.label || c.id, dir, parentExists });
+    }
+    return out;
+  }
+  this.skillTargets = skillTargets;
+
+  this.skillState = async function () {
+    let manifest = await readManifest();
+    let targets = await skillTargets();
+    return targets.map((t) => {
+      let entry = manifest.entries[t.dir];
+      return {
+        id: t.id,
+        label: t.label,
+        dir: t.dir,
+        parentExists: t.parentExists,
+        installed: !!entry,
+        mode: entry ? entry.mode : "",
+        stale: !!(entry && entry.version !== String(AgentMCP.version)),
+      };
+    });
+  };
+
+  async function installSkillOne(target) {
+    let srcFile = AgentMCP.skillPath();
+    let src = AgentMCP._skillSource;
+    if (!src) return { dir: target.dir, ok: false, error: "skill source missing" };
+    let parent = parentDirPath(target.dir);
+    if (!(await IOUtils.exists(parent))) {
+      return { dir: target.dir, ok: false, error: "客户端目录不存在" };
+    }
+    // Clean up a previous install of ours before recreating it.
+    await removeSkillOne(target.dir, { quiet: true });
+    let mode = "copy";
+    if (!Zotero.isWin) {
+      let ln = await systemTool("ln");
+      let srcDir = joinPath(bridgeDir(), "skill");
+      if (ln) {
+        let res = await runProcess(ln, ["-s", srcDir, target.dir], 5000);
+        if (res && res.code === 0) mode = "symlink";
+        else Zotero.debug("AgentMCP: ln -s failed: " + ((res && res.stderr) || "no result"));
+      }
+    }
+    if (mode === "copy") {
+      try {
+        await IOUtils.makeDirectory(target.dir, { ignoreExisting: true });
+        await IOUtils.writeUTF8(joinPath(target.dir, "SKILL.md"), src);
+      } catch (e) {
+        return { dir: target.dir, ok: false, error: String((e && e.message) || e) };
+      }
+    }
+    return { dir: target.dir, ok: true, mode, srcFile };
+  }
+
+  async function removeSkillOne(dir, { quiet } = {}) {
+    let manifest = await readManifest();
+    let entry = manifest.entries[dir];
+    if (!entry) {
+      if (!quiet) return { dir, ok: false, error: "未由本插件安装" };
+      return { dir, ok: true, skipped: true };
+    }
+    try {
+      if (entry.mode === "symlink") {
+        let rm = await systemTool("rm");
+        let res = rm ? await runProcess(rm, ["-f", dir], 5000) : null;
+        if (!res || res.code !== 0) {
+          // Fall back to unlinking through IOUtils (works for dangling links on some builds).
+          await IOUtils.remove(dir, { ignoreAbsent: true });
+        }
+      } else {
+        let file = joinPath(dir, "SKILL.md");
+        let cur = await readTextIfExists(file);
+        if (cur !== null && cur === String(AgentMCP._skillSource || "")) {
+          await IOUtils.remove(file, { ignoreAbsent: true });
+        }
+        // Only drop the directory when nothing else lives in it.
+        try {
+          let children = await IOUtils.getChildren(dir);
+          if (!children.length) await IOUtils.remove(dir, { ignoreAbsent: true });
+        } catch (e) {}
+      }
+    } catch (e) {
+      return { dir, ok: false, error: String((e && e.message) || e) };
+    }
+    delete manifest.entries[dir];
+    await writeManifest(manifest);
+    return { dir, ok: true };
+  }
+
+  this.installSkills = async function () {
+    let targets = await skillTargets();
+    let results = [];
+    let manifest = await readManifest();
+    for (let t of targets) {
+      if (!t.parentExists) {
+        results.push({ dir: t.dir, id: t.id, ok: false, error: "客户端目录不存在" });
+        continue;
+      }
+      let r = await installSkillOne(t);
+      results.push(Object.assign({ id: t.id }, r));
+      if (r.ok) {
+        manifest.entries[t.dir] = {
+          id: t.id,
+          mode: r.mode,
+          version: String(AgentMCP.version),
+          source: joinPath(bridgeDir(), "skill"),
+          at: new Date().toISOString(),
+        };
+      }
+    }
+    await writeManifest(manifest);
+    return results;
+  };
+
+  this.uninstallSkills = async function () {
+    let manifest = await readManifest();
+    let results = [];
+    for (let dir of Object.keys(manifest.entries)) {
+      results.push(await removeSkillOne(dir));
+    }
+    return results;
+  };
+
+  // ---------- MCP bridge release ----------
   async function releaseBridgeFiles() {
     let src = AgentMCP._bridgeSource;
     if (!src) return;
     let dir = bridgeDir();
     await IOUtils.makeDirectory(dir, { ignoreExisting: true });
     let dest = AgentMCP.bridgePath();
-    let stamp = PathUtils.join(dir, "version.txt");
-    let cur = null;
-    try {
-      cur = await IOUtils.readUTF8(stamp);
-    } catch (e) {}
-    if (cur !== String(AgentMCP.version) || !(await IOUtils.exists(dest))) {
-      await IOUtils.writeUTF8(dest, src);
-    }
-    await IOUtils.writeUTF8(stamp, String(AgentMCP.version));
-    // Agent routing skill — released next to the bridge so agents can install it
-    // (tools/install-skill.sh junctions it into the agent's skills directory).
+    let wrote = 0;
+    if (await writeIfChanged(dest, src)) wrote++;
     if (AgentMCP._skillSource) {
-      let skillDir = PathUtils.join(dir, "skill");
+      let skillDir = joinPath(dir, "skill");
       await IOUtils.makeDirectory(skillDir, { ignoreExisting: true });
-      let skillDest = PathUtils.join(skillDir, "SKILL.md");
-      let curSkill = null;
-      try {
-        curSkill = await IOUtils.readUTF8(skillDest);
-      } catch (e) {}
-      if (curSkill !== AgentMCP._skillSource) {
-        await IOUtils.writeUTF8(skillDest, AgentMCP._skillSource);
-      }
+      if (await writeIfChanged(PathUtils.join(skillDir, "SKILL.md"), AgentMCP._skillSource)) wrote++;
     }
-    // convenience config file
+    if (AgentMCP._clientsSource) {
+      let pretty = AgentMCP._clientsSource;
+      try {
+        pretty = JSON.stringify(JSON.parse(AgentMCP._clientsSource), null, 2);
+      } catch (e) {}
+      if (await writeIfChanged(dataFilePath("clients.json"), pretty)) wrote++;
+    }
+    if (await writeIfChanged(dataFilePath("version.txt"), String(AgentMCP.version))) wrote++;
+    // convenience config file (kept for hand-rolled setups)
     let cfg = {
-      _comment: "Paste the 'mcpServers' block into your agent's MCP config. Works with ZCode, Claude Desktop/Code, Cursor, etc.",
-      geminiAppCommand: `npx --prefer-offline -y zotero-agent-mcp --token ${getPref("token")}`,
-      url: `http://127.0.0.1:23119/zotero-agent-mcp`,
+      _comment:
+        "Generated by Zotero-Agent-MCP. Paste the 'mcpServers' block into your agent's MCP config, or use the settings pane's per-client copy buttons.",
+      url: baseUrl(),
       token: getPref("token"),
       bridge: dest,
       mcpServers: {
-        "zotero-agent": {
-          type: "stdio",
-          command: "node",
-          args: [dest],
-          env: {
-            ZOTERO_AGENT_URL: "http://127.0.0.1:23119/zotero-agent-mcp",
-            ZOTERO_AGENT_TOKEN: getPref("token"),
-          },
-        },
+        "zotero-agent": await serverEntry("node"),
       },
     };
-    await IOUtils.writeUTF8(PathUtils.join(dir, "zotero-agent-mcp.mcp.json"), JSON.stringify(cfg, null, 2));
+    if (await writeIfChanged(dataFilePath("zotero-agent-mcp.mcp.json"), JSON.stringify(cfg, null, 2))) wrote++;
+    await releaseAgentConfigs();
     bridgeReleasedVersion = String(AgentMCP.version);
+    if (wrote) Zotero.debug(`AgentMCP: released ${wrote} file(s) to ${dir}`);
   }
   this.releaseBridgeFiles = releaseBridgeFiles;
   this.bridgeReleasedVersion = () => bridgeReleasedVersion;
+
+  // ---------- connection self-test (real node + bridge, no shell glue) ----------
+  this.testConnection = async function () {
+    let t0 = Date.now();
+    let node = await nodePath();
+    let bridge = AgentMCP.bridgePath();
+    let out = { node, bridge, nodeOk: false, nodeVersion: "", mcpOk: false, tools: 0, toolSet: "", ms: 0, error: null };
+    let ver = await runProcess(node, ["--version"], 6000);
+    if (ver && ver.code === 0) {
+      out.nodeOk = true;
+      out.nodeVersion = String(ver.stdout || "").trim();
+    } else if (!getSubprocess()) {
+      out.error = "当前 Zotero 构建禁止启动子进程，请手动在终端执行：node <bridge> --selftest";
+      out.ms = Date.now() - t0;
+      return out;
+    } else {
+      out.error = (ver && (ver.stderr || `node 退出码 ${ver.code}`)) || "找不到 node";
+      out.ms = Date.now() - t0;
+      return out;
+    }
+    let res = await runProcess(node, [bridge, "--selftest"], 15000);
+    out.ms = Date.now() - t0;
+    if (!res || res.code !== 0) {
+      out.error = (res && (res.stderr || "").trim()) || "自检失败";
+      return out;
+    }
+    try {
+      let line = String(res.stdout || "").trim().split("\n").filter(Boolean).pop();
+      let parsed = JSON.parse(line);
+      out.mcpOk = !!parsed.ok;
+      out.tools = parsed.tools || 0;
+      out.toolSet = parsed.toolSet || "";
+      out.error = parsed.error || null;
+    } catch (e) {
+      out.error = "自检输出无法解析：" + String((e && e.message) || e);
+    }
+    return out;
+  };
 
   // ---------- HTTP plumbing ----------
   function errBody(code, message) {
@@ -739,6 +1726,9 @@ var AgentMCP = new function () {
     if (scope && typeof scope === "object") {
       scope = scope[options.method] ?? null;
     }
+    // Requests can arrive in the first milliseconds after startup, before the token
+    // has been reconciled with its on-disk copy. Already resolved afterwards (free).
+    if (readyPromise) await readyPromise;
     let t0 = Date.now();
     let status = 500;
     let body;
@@ -795,22 +1785,32 @@ var AgentMCP = new function () {
   };
 
   // ---------- route handlers ----------
-  async function hPing() {
-    let port = null;
+  // /ping is the agent's first call, so it stays small: the 34-route list moved
+  // behind ?verbose=1 (v0.6.0). libraries stay inline — agents use them right away.
+  async function hPing(ctx) {
+    let verbose = false;
     try {
-      port = Zotero.Server.port;
+      let v = ctx && ctx.params ? ctx.params.get("verbose") : "";
+      verbose = v === "1" || v === "true";
     } catch (e) {}
-    return {
+    let out = {
       plugin: "zotero-agent-mcp",
       version: String(AgentMCP.version),
       zoteroVersion: Zotero.version,
-      baseUrl: `http://127.0.0.1:${port}${BASE}`,
+      baseUrl: baseUrl(),
       enabled: !!getPref("enabled"),
       scopes: enabledScopes(),
       libraries: await allLibrariesJSON(),
-      endpoints: ROUTES.map((r) => `${(r.methods || ["GET"]).join("/")} ${r.path}${r.scope ? `  [${r.scope}]` : "  [public]"}`),
+      endpointCount: ROUTES.length,
+      startupMs: AgentMCP.startupMs ?? null,
       time: new Date().toISOString(),
     };
+    if (verbose) {
+      out.endpoints = ROUTES.map(
+        (r) => `${(r.methods || ["GET"]).join("/")} ${r.path}${r.scope ? `  [${r.scope}]` : "  [public]"}`
+      );
+    }
+    return out;
   }
 
   const hLibraries = async () => ({ libraries: await allLibrariesJSON() });
@@ -1077,7 +2077,11 @@ var AgentMCP = new function () {
       }
       item = new Zotero.Item(itemType);
       item.libraryID = libraryID;
-      item.setField("title", String(data.title || fileName.replace(/\.[^.]+$/, "")));
+      let title = String(data.title || "").trim() || (fileName ? fileName.replace(/\.[^.]+$/, "") : "");
+      if (!title && !(data.fields && (data.fields.title || data.fields.shortTitle))) {
+        throw new ABError(400, "bad_request", "creating an item without 'path' needs a 'title' (or fields.title); pass 'path' to build one from a local file");
+      }
+      item.setField("title", title);
       skippedFields = applyItemFields(item, data.fields);
       applyItemCreators(item, data.creators);
       applyItemTags(item, data.tags);
@@ -1690,38 +2694,71 @@ var AgentMCP = new function () {
   this.ROUTES = ROUTES;
 
   // ---------- lifecycle ----------
-  this.startup = async function ({ id, version, rootURI, bridgeSource, skillSource }) {
+  // Startup is split in two: the synchronous part registers the HTTP surface (so
+  // agents can connect within a few ms), and everything that touches the disk runs
+  // afterwards behind `readyPromise`, which handlers await.
+  this.startup = async function ({ id, version, rootURI, bridgeSource, skillSource, clientsSource }) {
+    let t0 = Date.now();
     this.id = id;
     this.version = version;
     this.rootURI = rootURI;
     this._bridgeSource = bridgeSource;
     this._skillSource = skillSource;
+    this._clientsSource = clientsSource;
     Zotero.AgentMCP = AgentMCP; // expose for prefs.js and debugging
+
     seedDefaults();
-    await migrateOldBranding();
-    await restoreStableToken();
+    // Seed a token synchronously so the very first request has something to match;
+    // the on-disk copy is reconciled below and wins if it differs.
+    if (!String(getPref("token") || "")) setPref("token", randomString(40));
 
     for (let r of ROUTES) {
       let ep = makeEndpoint(r.scope, r.handler, { methods: r.methods });
       Zotero.Server.Endpoints[r.path] = ep;
       registeredEndpoints.push(r.path);
     }
+    let registeredMs = Date.now() - t0;
 
     // Register the settings pane (auto-unregistered on plugin shutdown)
     Zotero.PreferencePanes.register({
       pluginID: id,
       src: rootURI + "prefs.xhtml",
       scripts: [rootURI + "prefs.js"],
+      image: rootURI + "icons/prefs-64.png",
       id: "zotero-agent-mcp-prefs",
       label: "Zotero-Agent-MCP",
     }).catch((e) => Zotero.logError(e));
 
-    // Release MCP bridge files (deferred, low priority)
-    releaseBridgeFiles().catch((e) => Zotero.logError(e));
+    // Deferred maintenance: token reconciliation, optional legacy migration, file
+    // release, daily audit rotation. Nothing here is needed to answer a request.
+    readyPromise = (async () => {
+      try {
+        await migrateOldBranding();
+        await restoreStableToken();
+        await releaseBridgeFiles();
+        await AgentMCP.autoSyncClients();
+        await maybeRotateAudit();
+        // Clear any error note from a previous launch.
+        await IOUtils.remove(dataFilePath("startup-error.txt"), { ignoreAbsent: true }).catch(() => {});
+      } catch (e) {
+        Zotero.logError(e);
+        // Surfaced in 高级设置 and handy when a user reports "setup did nothing".
+        try {
+          await IOUtils.writeUTF8(
+            dataFilePath("startup-error.txt"),
+            `${new Date().toISOString()}\n${(e && e.stack) || e}\n`
+          );
+        } catch (e2) {}
+      }
+      AgentMCP.startupMs = Date.now() - t0;
+      AgentMCP.startupBreakdown = { total: AgentMCP.startupMs, endpoints: registeredMs };
+      Zotero.debug(
+        `AgentMCP ready in ${AgentMCP.startupMs}ms (${ROUTES.length} endpoints in ${registeredMs}ms, ` +
+          `bridge=${bridgeReleasedVersion || "-"})`
+      );
+    })();
 
-    rotateAuditIfHuge().catch(() => {});
-
-    Zotero.debug(`AgentMCP ${version}: ${ROUTES.length} endpoints registered on http://127.0.0.1:23119/zotero-agent-mcp/`);
+    Zotero.debug(`AgentMCP ${version}: ${ROUTES.length} endpoints registered on ${baseUrl()}/`);
   };
 
   this.shutdown = function () {

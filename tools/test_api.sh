@@ -81,6 +81,19 @@ check() { # check <name> <expected_status> <curl args...>
 
 echo "== auth negatives =="
 check "ping public"                 200 "$BASE/ping"
+# v0.6.0: /ping stays small — route list only with ?verbose=1
+PING_DEFAULT=$(curl -s -m 30 "$BASE/ping")
+if echo "$PING_DEFAULT" | "$PY" -c "import sys,json;d=json.load(sys.stdin);sys.exit(0 if ('endpoints' not in d and d.get('endpointCount',0)>=30) else 1)"; then
+  PASS=$((PASS+1)); echo "PASS  [payload] ping slim (endpointCount, no endpoints)"
+else
+  FAIL=$((FAIL+1)); echo "FAIL  [payload] ping slim"; echo "$PING_DEFAULT" | head -c 300; echo
+fi
+PING_VERBOSE=$(curl -s -m 30 "$BASE/ping?verbose=1")
+if echo "$PING_VERBOSE" | "$PY" -c "import sys,json;d=json.load(sys.stdin);sys.exit(0 if isinstance(d.get('endpoints'),list) and len(d['endpoints'])>=30 else 1)"; then
+  PASS=$((PASS+1)); echo "PASS  [payload] ping?verbose=1 returns route list"
+else
+  FAIL=$((FAIL+1)); echo "FAIL  [payload] ping?verbose=1"; echo "$PING_VERBOSE" | head -c 300; echo
+fi
 check "search no token -> 401"      401 "$BASE/search?q=test"
 check "search bad token -> 401"     401 -H "Authorization: Bearer WRONG" "$BASE/search?q=test"
 check "libraries no token -> 401"   401 "$BASE/libraries"

@@ -1,191 +1,153 @@
 # Zotero-Agent-MCP
 
-让本地 AI agent（各类支持 MCP 的客户端或任意脚本）**快速、安全地读写 Zotero** 的插件。
-在 Zotero 内置 HTTP 服务（127.0.0.1:23119）上注册 `/zotero-agent-mcp/` API，并提供**零依赖 MCP 桥（34 个工具）**与**内置 agent 路由 skill**。
+让本地 AI agent（任何支持 MCP 的客户端或任意脚本）**快速、安全地读写 Zotero** 的插件。
+在 Zotero 内置 HTTP 服务（`127.0.0.1:23119`）上注册 `/zotero-agent-mcp/` API，并提供**零依赖 MCP 桥（34 个工具）**与**内置 agent 路由 skill**。
 插件在进程内直调 Zotero 内部 API，**能力是 Zotero 本地 API 的超集**——agent 无需再绕行 `/api/**`。
-**所有功能默认开放**，同时保留令牌鉴权、作用域开关、库白名单、速率限制与审计日志可随时收紧。
 
-已在本机真机安装并全量测试通过：**Zotero 10.0.2 (macOS)** HTTP 27/27、MCP E2E 21/21；
-**Zotero 10.0.3 (Windows)** HTTP 45/45（写库闸门全开）、MCP E2E 29/29（14 工具全量）；v0.5.0 工具面见测试章节。
+> **v0.6.0 重点**：设置面板极简化，**自动把 MCP 配置写进 9 种 agent 客户端**（合并写入、自动备份、可撤销、启动时自动同步令牌）；`tools/list` 上下文成本降到 58.8%；配置默认本地 node 直启（握手 ~25ms）；全套新图标。
 
-## 功能一览
+## 三步开始
 
-| 能力 | 端点 / 工具 | 作用域（默认全开） |
+1. **装插件**：`tools/build.sh` 构建 → Zotero → 工具 → 插件 → 齿轮 → *Install Plugin From File…* → 选 `build/zotero-agent-mcp.xpi`。
+2. **看设置**：Zotero → 设置 → **Zotero-Agent-MCP**。状态条确认「运行中」，令牌默认掩码显示。
+3. **接 agent**：装好插件后**自动完成**——启动时会把 `zotero-agent` 写入所有已安装客户端的配置，令牌变化后自动同步。
+   面板逐行显示 `已接入 / 未接入 / 未安装 / 令牌过期`，每行可 [更新] / [撤销]；点 **连接测试** 会用 node 真启一次桥接并回读 `/ping`。
+
+## 设置面板
+
+| 区块 | 内容 |
+|---|---|
+| 状态条 | 运行状态 · 版本 · 实际 `baseUrl`（跟随 Zotero 端口） |
+| 服务 | 启用开关 · 访问令牌（显示/复制/重新生成，重新生成需确认） |
+| 接入 agent | 9 个客户端逐行状态 + [更新]/[撤销] · 全部接入 · 连接测试 · 自动同步开关 · 安装/撤销 skill |
+| 高级设置（折叠） | 六个功能作用域（中文标签）· 库白名单 · 速率限制 · 审计日志 + 查看 · 桥接目录 · 通用 mcpServers / curl 复制 |
+
+写入是**合并式**的：只增改 `zotero-agent` 这一条，其它条目与原有格式原样保留；首次改动前生成 `<配置文件>.zotero-agent-mcp.bak` 备份；高级里可「撤销全部接入」。
+
+## 客户端支持
+
+| 客户端 | 配置位置 | 写入格式 |
 |---|---|---|
-| 状态自检 | `GET /zotero-agent-mcp/ping` ⇄ `zotero_ping` | 公开 |
-| 库列表（个人+群组） | `/libraries` ⇄ `zotero_libraries` | read |
-| 集合树 | `/collections` ⇄ `zotero_collections` | read |
-| 搜集合（返回父链路径） | `/collections/search?q=` ⇄ `zotero_search_collections` | read |
-| 集合内条目 | `/collection/:key/items` ⇄ `zotero_get_collection_items` | read |
-| 检索（标题/作者/年份 或 全文） | `/search?q=` ⇄ `zotero_search` | read |
-| 最近条目 | `/items/recent` ⇄ `zotero_recent` | read |
-| 回收站列表 | `/items/trash` ⇄ `zotero_get_trash` | read |
-| 条目完整元数据 | `/item/:key` ⇄ `zotero_get_item` | read |
-| **PDF/EPUB/文本全文**（自动定位最佳附件、分页） | `/item/:key/fulltext` ⇄ `zotero_get_fulltext` | fulltext |
-| **写全文索引**（OCR/外部文本入检索） | `POST /item/:key/fulltext/set` ⇄ `zotero_set_fulltext` | fulltext |
-| **高亮与批注** | `/item/:key/annotations` ⇄ `zotero_get_annotations` | annotations |
-| 子附件/子笔记 | `/item/:key/children` ⇄ `zotero_get_children` | read |
-| **引文/导出**（任意 CSL 样式 + bibtex/ris/csljson/csv…） | `/item/:key/cite` ⇄ `zotero_cite` | export |
-| 附件原文件（base64） | `/item/:key/file` ⇄ `zotero_get_item`+`file` | files |
-| 附件本地路径 | `/item/:key/path` ⇄ `zotero_get_attachment_path` | files |
-| **建条目**（纯元数据或本地文件 + fields/creators/集合/标签一次写全） | `POST /item` ⇄ `zotero_add_item` | write |
-| **改条目元数据**（字段/作者/标签/集合/note/进回收站） | `POST /item/:key/update` ⇄ `zotero_update_item` | write |
-| **删条目**（默认回收站，permanent 永删） | `POST /item/:key/delete` ⇄ `zotero_delete_item` | write |
-| **改集合归属**（替换/加入/移出，按 key 或精确名，含子集合） | `POST /item/:key/collections` ⇄ `zotero_set_item_collections` | write |
-| **给既有条目挂文件** | `POST /item/:key/attach` ⇄ `zotero_attach_file` | write |
-| **建集合**（含子集合） | `POST /collection` ⇄ `zotero_create_collection` | write |
-| **改集合**（改名/移动/回收站） | `POST /collection/:key/update` ⇄ `zotero_update_collection` | write |
-| **删集合**（成员条目只解除归属） | `POST /collection/:key/delete` ⇄ `zotero_delete_collection` | write |
-| 新增子笔记 | `POST /note` ⇄ `zotero_add_note` | write |
-| 增/删标签 | `POST /tag` ⇄ `zotero_add_tag` | write |
-| 库内全部标签 | `/tags` ⇄ `zotero_get_tags` | read |
-| 整库删标签 | `POST /tags/delete` ⇄ `zotero_delete_tags` | write |
-| 保存的检索：列表 | `/searches` GET ⇄ `zotero_get_searches` | read |
-| 保存的检索：创建 | `/searches` POST ⇄ `zotero_create_search` | write |
-| 保存的检索：改/删 | `POST /search/:key/update|delete` ⇄ `zotero_update_search` / `zotero_delete_search` | write |
-| **执行保存的检索**（web API 都没有的能力） | `/search/:key/items` ⇄ `zotero_run_search` | read |
-| 字段名自省 | `/schema?itemType=` ⇄ `zotero_get_schema` | read |
-| 增量版本同步 | `/versions?type=&since=` ⇄ `zotero_versions` | read |
+| Claude Code | `~/.claude.json` | `mcpServers` |
+| Claude Desktop | `~/Library/Application Support/Claude/claude_desktop_config.json`（Win: `%APPDATA%\Claude\…`） | `mcpServers` |
+| Cursor | `~/.cursor/mcp.json` | `mcpServers` |
+| Codex CLI | `~/.codex/config.toml` | `[mcp_servers.zotero-agent]` TOML |
+| Gemini CLI | `~/.gemini/settings.json` | `mcpServers`（默认 npx 变体） |
+| ZCode | `~/.zcode/cli/config.json` | `mcp.servers` |
+| VS Code | `~/Library/Application Support/Code/User/mcp.json` 或 `.vscode/mcp.json` | `servers` |
+| OpenCode | `~/.config/opencode/opencode.json` | `mcp`（`type: local`） |
+| Pi agent | `~/.pi/agent/mcp.json` | `mcpServers` |
 
-## 安装
+想加自己的客户端：在 `<Zotero 数据目录>/zotero-agent-mcp/clients.local.json` 里按 `clients.json` 的结构追加/覆盖（按 `id` 合并），面板会自动按新注册表写入。
 
-1. 构建：`tools/build.sh`（产物 `build/zotero-agent-mcp` xpi，见 build 目录）。
-2. Zotero → 工具 → 插件 → 齿轮 → **Install Plugin From File…** → 选择该 xpi。
-3. 设置 → **Zotero-Agent-MCP** 面板：查看/复制访问令牌（所有功能默认已开放）。
+`~/Zotero/zotero-agent-mcp/agent-configs.json` 里有全部客户端的 node / npx 两种配置片段，供脚本或手动粘贴使用。
 
-> ⚠️ **Zotero 10 兼容要点**（实测踩坑）：`applications.zotero` 中**必须包含 `update_url`**，
-> 否则安装会以"文件损坏/不兼容"拒绝（错误码 -3）；`strict_max_version` 用 `10.*`
->（一颗星），两颗星 `10.*.*` 会被版本比较器判定 > `10.0.2` 而不兼容。
+## 两种启动方式
 
-## 接入 AI agent（两种方式）
+| 方式 | 命令 | 适用 |
+|---|---|---|
+| 本地 node 直启（默认） | `"/usr/local/bin/node" "<数据目录>/zotero-agent-mcp/zotero-agent-mcp.mjs"` | 所有能访问文件系统的客户端，握手 ~25ms |
+| npx | `npx --prefer-offline -y zotero-agent-mcp --token <令牌>` | 沙盒客户端（如 Gemini App）、不想暴露文件路径时；命中缓存 ~0.5s |
 
-### 方式 A：MCP（推荐，通用 stdio 协议）
-插件已把桥和现成配置释放到 `~/Zotero/zotero-agent-mcp/`。设置面板点"复制 MCP 配置 JSON"，或直接把
-`~/Zotero/zotero-agent-mcp/zotero-agent-mcp.mcp.json` 里的 `mcpServers` 块粘贴进 agent 的 MCP 配置：
+令牌也可由桥自动读取 `~/Zotero/zotero-agent-mcp/token`，但显式 `env.ZOTERO_AGENT_TOKEN` 更稳。
 
-```json
-{
-  "mcpServers": {
-    "zotero-agent": {
-      "type": "stdio",
-      "command": "node",
-      "args": ["/Users/<你>/Zotero/zotero-agent-mcp/zotero-agent-mcp.mjs"],
-      "env": {
-        "ZOTERO_AGENT_URL": "http://127.0.0.1:23119/zotero-agent-mcp",
-        "ZOTERO_AGENT_TOKEN": "<你的令牌>"
-      }
-    }
-  }
-}
-```
+### 直接 HTTP
 
-### 方式 A-2：`npx` 单命令接入（推荐，兼容沙盒环境）
-已发布至 npm（[`zotero-agent-mcp`](https://www.npmjs.com/package/zotero-agent-mcp)），对于仅支持单行命令或运行在默认沙盒下的 MCP 客户端，只需一条 `npx` 命令即可启动（无需配置环境变量或开放全盘文件权限）：
-
-1. 确保 Zotero 已启动且安装了本插件；在 Zotero 设置 → **Zotero-Agent-MCP** 面板点击复制单行命令（或复制访问令牌自行拼接）：
-   ```bash
-   npx --prefer-offline -y zotero-agent-mcp --token <你的令牌>
-   ```
-   > 说明：`--prefer-offline` 会在首次下载缓存后优先从 `~/.npm` 本地启动（约 0.5 秒），避免每次启动联网查询导致 MCP 客户端握手超时；若修改过 Zotero 端口，可追加 `--url http://127.0.0.1:<端口>/zotero-agent-mcp`。
-
-2. 在客户端的本地 MCP 配置中填入：
-   - **服务器 ID**：`zotero-agent`
-   - **命令**：`npx --prefer-offline -y zotero-agent-mcp --token <你的令牌>`
-   - **沙盒设置**：保持默认即可（仅需访问 `~/.npm` 缓存与本地回环网络 `127.0.0.1:23119`）。
-
-> 若客户端使用 JSON 配置文件，也可按如下格式填写：
-> ```json
-> {
->   "mcpServers": {
->     "zotero-agent": {
->       "command": "npx",
->       "args": ["--prefer-offline", "-y", "zotero-agent-mcp", "--token", "<你的令牌>"]
->     }
->   }
-> }
-> ```
-
-### 方式 B：直接 HTTP
 ```bash
-curl http://127.0.0.1:23119/zotero-agent-mcp/ping
+curl http://127.0.0.1:23119/zotero-agent-mcp/ping                 # 无需令牌；?verbose=1 看全部路由
 curl -H "Authorization: Bearer <令牌>" "http://127.0.0.1:23119/zotero-agent-mcp/search?q=社会治理&limit=5"
-curl -H "Authorization: Bearer <令牌>" "http://127.0.0.1:23119/zotero-agent-mcp/item/<KEY>/fulltext"
+curl -H "Authorization: Bearer <令牌>" "http://127.0.0.1:23119/zotero-agent-mcp/item/<KEY>/fulltext?maxChars=20000"
 curl -H "Authorization: Bearer <令牌>" "http://127.0.0.1:23119/zotero-agent-mcp/item/<KEY>/cite?format=bibtex"
-# 纯元数据建条目（一次写全字段/作者/集合/标签，无需本地文件）
+# 纯元数据建条目（一次写全字段/作者/集合/标签）
 curl -X POST -H "Authorization: Bearer <令牌>" -H "Content-Type: application/json" \
   -d '{"itemType":"journalArticle","title":"平台用工研究","creators":[{"name":"张三"}],"fields":{"date":"2024","publicationTitle":"社会学研究"},"collections":["文献脉络"],"tags":["agent"]}' \
   http://127.0.0.1:23119/zotero-agent-mcp/item
-# 或从本地 PDF 建条目并挂附件（mode=link 则只引用原路径不复制）
-curl -X POST -H "Authorization: Bearer <令牌>" -H "Content-Type: application/json" \
-  -d '{"path":"/path/to/paper.pdf","itemType":"document","collections":["我的收藏"],"recognize":true}' \
-  http://127.0.0.1:23119/zotero-agent-mcp/item
-# 改条目集合归属：replace（默认，全量替换）/ add / remove；空数组+replace=清空
-curl -X POST -H "Authorization: Bearer <令牌>" -H "Content-Type: application/json" \
-  -d '{"mode":"add","collections":["新就业组织·文献脉络"]}' \
-  http://127.0.0.1:23119/zotero-agent-mcp/item/<KEY>/collections
 ```
 
-### 方式 C：内置 agent 路由 skill
+## 能力一览（34 端点 / 34 工具）
 
-插件把路由 skill 释放到数据目录 `zotero-agent-mcp/skill/SKILL.md`，内容是"一切 Zotero 操作走
-zotero-agent MCP、禁止直调本地 API"的路由铁律 + 34 工具映射表 + 旧工具名对照。安装到支持 Skills 的 agent：
+| 能力 | 端点 ⇄ 工具 | 作用域 |
+|---|---|---|
+| 状态自检 | `GET /ping` ⇄ `zotero_ping` | 公开 |
+| 库列表（个人+群组） | `/libraries` ⇄ `zotero_libraries` | read |
+| 集合树 / 按名搜集合 | `/collections`、`/collections/search` ⇄ `zotero_collections`、`zotero_search_collections` | read |
+| 集合内条目 | `/collection/:key/items` ⇄ `zotero_get_collection_items` | read |
+| 检索（标题/作者/年份 或 全文） | `/search?q=` ⇄ `zotero_search` | read |
+| 最近条目 / 回收站 | `/items/recent`、`/items/trash` ⇄ `zotero_recent`、`zotero_get_trash` | read |
+| 条目完整元数据 | `/item/:key` ⇄ `zotero_get_item` | read |
+| PDF/EPUB 全文（分页） | `/item/:key/fulltext` ⇄ `zotero_get_fulltext` | fulltext |
+| 写全文索引（OCR 等） | `POST /item/:key/fulltext/set` ⇄ `zotero_set_fulltext` | fulltext |
+| 高亮与批注 | `/item/:key/annotations` ⇄ `zotero_get_annotations` | annotations |
+| 子附件/子笔记 | `/item/:key/children` ⇄ `zotero_get_children` | read |
+| 引文/导出（CSL、bibtex、ris…） | `/item/:key/cite` ⇄ `zotero_cite` | export |
+| 附件原文件 / 本地路径 | `/item/:key/file`、`/item/:key/path` ⇄ `zotero_get_item`+`file`、`zotero_get_attachment_path` | files |
+| 建条目（文件或纯元数据） | `POST /item` ⇄ `zotero_add_item` | write |
+| 改条目 / 删条目 | `POST /item/:key/update|delete` ⇄ `zotero_update_item`、`zotero_delete_item` | write |
+| 改集合归属 | `POST /item/:key/collections` ⇄ `zotero_set_item_collections` | write |
+| 给条目挂文件 | `POST /item/:key/attach` ⇄ `zotero_attach_file` | write |
+| 集合增改删 | `POST /collection`、`/collection/:key/update|delete` ⇄ `zotero_create_collection`、`zotero_update_collection`、`zotero_delete_collection` | write |
+| 笔记 / 标签 | `POST /note`、`/tag`、`/tags/delete` ⇄ `zotero_add_note`、`zotero_add_tag`、`zotero_delete_tags` | write |
+| 库内标签 | `/tags` ⇄ `zotero_get_tags` | read |
+| 保存的检索（列表/建/改/删/执行） | `/searches`、`/search/:key/items|update|delete` ⇄ `zotero_get_searches`、`zotero_create_search`、`zotero_update_search`、`zotero_delete_search`、`zotero_run_search` | read/write |
+| 字段名自省 | `/schema?itemType=` ⇄ `zotero_get_schema` | read |
+| 增量版本同步 | `/versions?type=&since=` ⇄ `zotero_versions` | read |
 
-```bash
-tools/install-skill.sh   # 自动定位数据目录，junction 到 agent 的 skills 目录
-```
-
-更新插件即自动更新 skill（junction 指向释放目录）。
+`library` 参数：`user`（默认）/ 数字 libraryID / `all`（仅 search）。错误统一 `{error, message}`：401 未鉴权 / 403 越权 / 404 不存在 / 400 参数 / 409 只读库 / 415 无法提取 / 429 限流 / 503 插件被禁用。
 
 ## 安全模型
 
-- 仅绑定 `127.0.0.1`；Zotero 自带 Host 头校验（防 DNS rebinding）与浏览器请求拦截。
-- 所有业务端点需要 `Authorization: Bearer <令牌>`（或 `X-Agent-Token`），令牌可在面板随时重新生成。
-- 六个作用域**默认全部开放**，可单独关闭收紧；`write` 含条目/集合/笔记/标签的创建与修改（删除默认进回收站，`permanent` 才真删；条目更新支持 version 防冲突），不提供批量清库。
+- 仅绑 `127.0.0.1`；Zotero 自带 Host 校验（防 DNS rebinding）与浏览器请求拦截，响应不发 CORS 头。
+- 所有业务端点需 `Authorization: Bearer <令牌>`（或 `X-Agent-Token`）。
+- 六个作用域默认全开，可单独关闭；`write` 含条目/集合/笔记/标签的增改（删除默认进回收站，`permanent` 才真删）。
+- 客户端配置写入是合并式的（只动 `zotero-agent` 条目）、原子写入（临时文件 + rename）、保留原备份；关掉「启动时自动同步」即只在你点按钮时写。
 - 库白名单（留空=全部）、速率限制（默认 240 req/min）、全文分页与附件大小上限。
-- 审计日志：`~/Zotero/zotero-agent-mcp-audit.jsonl`（JSONL，可关闭；不记录完整令牌）。
+- 审计日志 `~/Zotero/zotero-agent-mcp-audit.jsonl`（JSONL，可关；只记令牌前 4 位；超过 5MB 每天最多轮转一次）。
+
+## 性能（本机 macOS，Zotero 10.0.9 / node v24）
+
+| 指标 | 数值 |
+|---|---|
+| 单次 HTTP 请求 | 0–1 ms |
+| 桥握手（本地 node 直启，`initialize → tools/list`） | p50 ≈ 25 ms（空闲）/ 33 ms（Zotero 同时运行） |
+| `tools/list` 体积 | 12130 B ≈ 3.0k tokens（v0.5.1 为 20619 B） |
+| `--tools=core` 13 工具 | 5421 B |
+| 插件启动（端点注册→维护完成） | `GET /ping` 的 `startupMs` 字段（实测 17 ms） |
+
+`tools/bench.mjs` 可随时复测（`--baseline` 写基线，默认与 `tools/bench-baseline.json` 对比）。
 
 ## 项目结构
 
 ```
-plugin/            插件源码（manifest.json / bootstrap.js / zotero-agent-mcp.js / prefs.* / skill/SKILL.md / icon.png）
-bridge/zotero-agent-mcp.mjs  MCP 桥（零依赖 Node，34 工具，随包释放到 ~/Zotero/zotero-agent-mcp/）
-tools/build.sh     构建 xpi（含把桥和 skill 打进插件的 bridge-source.js / skill-source.js 生成）
-tools/test_api.sh  HTTP 全端点测试（含鉴权负例；RUN_NOTE_TEST/CREATE_ITEM_TEST/SET_COLLECTIONS_TEST/MANAGE_TEST 控制写库用例）
-tools/test_bridge.mjs  MCP 桥 E2E（initialize/tools/list/全部 34 工具）
-tools/authorize_localapi.sh  一次性本地 API 写授权（供测试播种集合，key 缓存 tools/.localapi-key）
-tools/install-skill.sh  把插件释放的路由 skill 挂载到 agent skills 目录（junction）
-DESIGN.md          grillme 自问自答设计文档 + 验收矩阵
+plugin/                  插件源码（manifest / bootstrap / 核心模块 / prefs.xhtml+prefs.js / clients.json / icons/ / skill/SKILL.md）
+bridge/zotero-agent-mcp.mjs  MCP 桥（零依赖 Node，34 工具；随包释放到数据目录）
+tools/build.sh           构建 xpi（内嵌 bridge/skill/clients，构建时打印 tools/list 体积）
+tools/bench.mjs          握手与上下文体积基准
+tools/test_api.sh        HTTP 全端点测试（写库用例用 RUN_NOTE_TEST/CREATE_ITEM_TEST/SET_COLLECTIONS_TEST/MANAGE_TEST 开启）
+tools/test_bridge.mjs    MCP 桥 E2E（34 工具 + 体积/描述/annotations/core 集断言）
+tools/test_config_merge.mjs  客户端配置合并器回归（对真实 ~/.claude.json、Codex TOML 等做幂等/撤销断言）
+tools/install-skill.sh   CLI 版 skill 安装/撤销（面板按钮的无头等价物）
+tools/make-icons.py      生成 icons/（PIL，8× 超采样）
+DESIGN.md / CHANGELOG.md 设计自问自答 / 版本变更
 ```
 
-## 真机测试结论（Zotero 10.0.3 Windows，v0.4.1）
+## 测试
 
-- HTTP 套件 45/45（RUN_NOTE_TEST / CREATE_ITEM_TEST / SET_COLLECTIONS_TEST 全开）✅
-- MCP 桥 E2E 29/29：14 工具全量，含 fields/creators 元数据回读
-  （中文单字段 `{name}`、西文 `{firstName,lastName}`、无效字段进 `skippedFields`）
-  与改集合（replace/no-op/按名 add/remove/404/400）✅
-- Windows 移植修复（真机回归发现，v0.4.0 时 26/27 唯一失败）：
-  新版 Gecko `initWithPath` 拒绝正斜杠路径 → 建条目前归一化分隔符；
-  `pathToFile` 抛错改为干净 404。
-- Windows 踩坑：MSYS/Git Bash 的 `/tmp` 对 Zotero 进程不可见——测试脚本已用
-  `cygpath` 转真实 Windows 路径；python 探测 `python3 || python` + `PYTHONUTF8=1`。
-- 改集合用例的集合播种走 Zotero 10 本地 API（写需持久 key）：一次性运行
-  `tools/authorize_localapi.sh`（Zotero 弹窗点"始终允许"），key 缓存于 `tools/.localapi-key`。
+```bash
+tools/build.sh
+TOKEN=$(cat ~/Zotero/zotero-agent-mcp/token)
+RUN_NOTE_TEST=1 CREATE_ITEM_TEST=1 MANAGE_TEST=1 tools/test_api.sh "$TOKEN"   # HTTP
+ZOTERO_AGENT_TOKEN="$TOKEN" CREATE_ITEM_TEST=1 MANAGE_TEST=1 node tools/test_bridge.mjs  # MCP
+node tools/test_config_merge.mjs                                             # 配置写入 / 撤销
+node tools/bench.mjs --runs=7                                                # 性能
+```
 
-## 真机测试结论（Zotero 10.0.2 macOS）
-
-- 安装/重启自动加载、令牌持久化、桥文件自动释放 ✅
-- HTTP：鉴权负例 401、未知路由 404、坏参数 400、未知条目 404、未知样式 400、
-  note/tag/file/建条目 全通 ✅（27/27）
-- 全文：中文 PDF 自动提取、`offset/maxChars` 分页 ✅
-- 标注、APA 参考文献表、BibTeX 导出 ✅
-- 本地 PDF 建条目：附件导入 storage、入集合、打标签 ✅
-- MCP 桥：initialize / tools/list（13 工具）/ 全部调用 / 错误语义 ✅（21/21）
-- 设置面板渲染与交互（开关即时生效）、中文数据无乱码 ✅
+最近一次真机回归（Zotero 10.0.9 macOS）：HTTP **86/86**、MCP E2E **55/55**、配置合并 **45/45**、`tools/list` 体积 58.8%。
 
 ## 故障排查
 
-- **安装提示不兼容/损坏**：确认 manifest 有 `update_url`、`strict_max_version` 为 `10.*`。
-- **agent 连不上**：先 `curl .../ping`（无需令牌）；再确认设置面板"启用"已勾选、令牌一致。
-- **`npx` 启动握手超时 / 审计日志无新请求记录**：使用 `npx -y github:...` 每次都会拉取远端仓库（无代理环境下耗时可达 ~20 秒），而裸用 `npx -y zotero-agent-mcp` 默认也会每次联网校验元数据（~4 秒），网络抖动时易导致 MCP 客户端握手超时。请统一使用 `npx --prefer-offline -y zotero-agent-mcp --token <令牌>`（命中 `~/.npm` 缓存约 0.5 秒秒开，未缓存时自动联网下载）。若 macOS GUI 客户端提示找不到 `npx`（未继承终端 `PATH`），可将 `npx` 替换为绝对路径（如 `/usr/local/bin/npx` 或 `/opt/homebrew/bin/npx`）。
-- **工具报 scope_disabled**：到设置 → Zotero-Agent-MCP 打开对应开关（默认全开，一般不会遇到）。
-- **401**：令牌错误；在面板重新复制。
+- **安装提示不兼容/损坏**：`manifest.json` 必须有 `update_url`，`strict_max_version` 用 `10.*`（一颗星）。
+- **agent 连不上**：设置面板 → 连接测试。若显示「MCP 自检失败」，看提示（Zotero 未运行 / 令牌不符 / node 缺失）。
+- **工具报 401**：令牌变了。面板复制令牌，或对标记「令牌不同」的客户端重新复制配置。
+- **工具报 403 scope_disabled**：高级设置里打开对应作用域。
+- **`npx` 启动慢或握手超时**：改用该行的 `node` 变体（默认），或确认 `npx --prefer-offline` 已缓存；macOS GUI 客户端找不到 `npx` 时用绝对路径（`/usr/local/bin/npx`、`/opt/homebrew/bin/npx`）。
+- **只看到 13 个工具**：客户端用了 `--tools=core`。改成默认 `full` 即可恢复 34 个工具。

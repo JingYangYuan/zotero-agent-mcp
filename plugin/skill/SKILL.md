@@ -1,11 +1,11 @@
 ---
 name: zotero-agent
-description: 本机 Zotero 文献库操作的统一通道：检索、读写元数据、建/删条目与集合、笔记标签、全文、引文、归档，全部走 zotero-agent MCP 插件的 34 个工具。禁止直接调用 Zotero 本地 API（127.0.0.1:23119/api/**）或 Connector 接口。当任务涉及操作 Zotero、查文献库、文献入库/归档/补元数据/建集合时使用。
+description: 本机 Zotero 文献库操作的统一通道：检索、读写元数据、建/删条目与集合、笔记标签、全文、引文、归档，全部走 zotero-agent MCP 插件的 34 个工具（连接信息不全时用 --tools=core 的精简 13 个工具集）。禁止直接调用 Zotero 本地 API（127.0.0.1:23119/api/**）或 Connector 接口。当任务涉及操作 Zotero、查文献库、文献入库/归档/补元数据/建集合时使用。
 ---
 
 # Zotero 操作路由（zotero-agent MCP）
 
-本机 Zotero（10.x，Windows）由 **zotero-agent-mcp 插件**提供 MCP 服务，工具前缀 `zotero_`。
+本机 Zotero（10.x）由 **zotero-agent-mcp 插件**（v0.6.0+）提供 MCP 服务，工具前缀 `zotero_`。
 本技能是 Zotero 操作的**唯一路由指引**，与其它技能（如文献综述流程技能）中的 Zotero 工具名冲突时，**以本技能为准**。
 
 ## 路由铁律
@@ -19,9 +19,17 @@ description: 本机 Zotero 文献库操作的统一通道：检索、读写元�
 
 ## 启动自检（每个涉及 Zotero 的任务开始时）
 
-1. `zotero_ping` —— 确认插件在线、版本 ≥ 0.5.0、write 作用域开启。
+1. `zotero_ping` —— 确认插件在线、版本 ≥ 0.6.0、write 作用域开启。返回里只有 `endpointCount`，要看全部路由用 HTTP `GET /zotero-agent-mcp/ping?verbose=1`。
 2. **按任务核对所需写工具**（不要只验检索！）：任务要建集合就调 `zotero_search_collections` 确认现状；要改元数据就先 `zotero_get_schema` 拿字段名。发现工具缺失 → 报告，不要先斩后奏。
 3. 涉及批量写（>10 条）时，先在日志里登记计划（建多少、改多少、入哪些集合），再执行。
+4. 工具列表异常少（只有 13 个）说明该客户端用的是精简工具集 `--tools=core`：缺的工具（删除/集合管理/保存检索等）请让用户改用默认 `full` 集，而不是绕行本地 API。
+
+## 连接不上时（交给用户操作，不要自己改配置）
+
+- Zotero 设置 → **Zotero-Agent-MCP** →「接入 agent」：插件启动时会自动把 MCP 配置合并写入已安装客户端的配置文件并自动同步令牌；逐行可「更新 / 撤销」，异常时点「连接测试」。
+- 同一面板的「连接测试」会用 node 真启一次桥接并回读 `/ping`，输出耗时与工具数；失败会给出原因（Zotero 没开 / 令牌不符 / node 缺失）。
+- 需要自检命令时可直接执行：`node <Zotero 数据目录>/zotero-agent-mcp/zotero-agent-mcp.mjs --selftest`。
+- 令牌在面板里默认掩码显示，点「显示」才可见；重新生成后所有已接入客户端都要重新复制配置。
 
 ## 工具映射（34 个，按任务）
 
@@ -92,8 +100,8 @@ description: 本机 Zotero 文献库操作的统一通道：检索、读写元�
 
 ## 故障排查
 
-- 工具报 "Cannot reach Zotero AgentMCP" → Zotero 没开或插件被禁用：让用户打开 Zotero，设置 → Zotero-Agent-MCP 确认"启用服务"勾选。
-- 401 → 令牌过期：Zotero 设置面板 → Zotero-Agent-MCP → 复制令牌，更新 agent 的 MCP 配置 env `ZOTERO_AGENT_TOKEN`。
-- 403 scope_disabled → 设置面板打开对应作用域。
+- 工具报 "Cannot reach Zotero AgentMCP" → Zotero 没开或插件被禁用：让用户打开 Zotero，设置 → Zotero-Agent-MCP 确认「启用服务」勾选，再点「连接测试」。
+- 401 → 令牌不符：面板点击「复制」令牌，或重新复制该客户端的配置（面板会标出「令牌不同」的客户端）。
+- 403 scope_disabled → 面板「高级设置」里打开对应作用域。
 - 写条目报字段被跳过 → 见 `skippedFields`，用 `zotero_get_schema` 核对字段名。
-- 插件本身的问题/功能缺口 → 仓库 `C:\Users\YJY\Desktop\07-开发项目\zotero-agent-mcp`，改完 `tools/build.sh` 出 xpi 重装。
+- 插件本身的问题/功能缺口 → 仓库 `zotero-agent-mcp`，改完 `tools/build.sh` 出 xpi 重装（脚本会打印 `tools/list` 体积与握手耗时）。

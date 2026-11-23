@@ -1,121 +1,129 @@
 <vbox xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul"
       xmlns:html="http://www.w3.org/1999/xhtml"
-      id="zam-root"
-      style="max-width: 720px;">
+      id="zotero-agent-mcp-prefs">
 
   <html:style>
-    .zam-hero { padding: 0 2px 12px; }
-    .zam-hero-row { display: flex; align-items: center; }
-    .zam-chip {
-      padding: 2px 8px; border-radius: 999px;
-      font-size: 10.5px; font-weight: 600; line-height: 1.4;
-      background: rgba(204, 41, 54, 0.10); color: #c2373f;
-    }
-    .zam-status {
-      margin-left: auto; font-size: 11px; font-weight: 600;
-      color: #2da44e; display: inline-flex; align-items: center;
-    }
-    .zam-status::before {
-      content: ""; width: 7px; height: 7px; border-radius: 50%;
-      background: #2da44e; margin-right: 5px;
-    }
-    .zam-status.off { color: rgba(127, 127, 127, 0.9); }
-    .zam-status.off::before { background: rgba(127, 127, 127, 0.55); }
-
-    .zam-card {
-      background: rgba(127, 127, 127, 0.05);
-      border: 1px solid rgba(127, 127, 127, 0.22);
-      border-radius: 10px;
-      padding: 12px 14px;
-      margin-bottom: 12px;
-    }
-    .zam-sec {
-      font-size: 12px; font-weight: 700; margin-bottom: 9px;
-      display: flex; align-items: center;
-    }
-    .zam-sec::before {
-      content: ""; width: 5px; height: 5px; border-radius: 50%;
-      background: #cc2936; margin-right: 7px;
-    }
-    .zam-sec-note {
-      margin-left: auto; font-weight: 400; font-size: 10.5px;
-      color: rgba(127, 127, 127, 0.85);
-    }
-    .zam-div { height: 1px; background: rgba(127, 127, 127, 0.18); margin: 10px 0; }
-    .zam-label { font-size: 12px; color: rgba(127, 127, 127, 0.95); margin-right: 10px; }
-    .zam-token { flex: 1; font-family: Consolas, Menlo, monospace; font-size: 11px; min-width: 0; }
-    .zam-hint { margin-top: 8px; font-size: 10.5px; color: rgba(127, 127, 127, 0.85); }
-    .zam-card button { margin: 0; }
-    .zam-card hbox > button { margin-right: 8px; }
-    .zam-card hbox > button:last-child { margin-right: 0; }
-    .zam-card checkbox { margin: 3px 0; }
-    .zam-col { display: flex; flex-direction: column; }
-    .zam-hint-inline { font-size: 10.5px; color: rgba(127, 127, 127, 0.85); margin-left: 8px; }
+    #zotero-agent-mcp-prefs { max-width: 760px; }
+    .zam-title { font-size: 15px; font-weight: 700; }
+    .zam-chip { margin-left: 7px; padding: 0 7px; border-radius: 999px; font-size: 10.5px;
+      font-weight: 600; background: rgba(204,41,54,.14); color: #cc2936; }
+    .zam-pill { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px;
+      font-weight: 600; color: #2da44e; white-space: nowrap; }
+    .zam-pill::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+    .zam-pill.off { color: rgba(127,127,127,.9); }
+    .zam-mono { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 10.5px;
+      color: rgba(127,127,127,.95); user-select: text; }
+    .zam-name { font-size: 12.5px; font-weight: 600; min-width: 112px; }
+    .zam-badge { font-size: 10px; font-weight: 600; padding: 0 6px; border-radius: 999px;
+      border: 1px solid rgba(127,127,127,.35); color: rgba(127,127,127,.95); white-space: nowrap; }
+    .zam-badge.ok { color: #2da44e; border-color: rgba(45,164,78,.5); background: rgba(45,164,78,.10); }
+    .zam-badge.warn { color: #bf8700; border-color: rgba(191,135,0,.5); background: rgba(191,135,0,.10); }
+    .zam-badge.bad { color: #cf222e; border-color: rgba(207,34,46,.45); background: rgba(207,34,46,.08); }
+    .zam-client { padding: 2px 0; border-bottom: 1px solid rgba(127,127,127,.16); }
+    .zam-client:last-of-type { border-bottom: 0; }
+    .zam-client button { font-size: 11px; min-height: 22px; }
+    .zam-hint { font-size: 10px; color: rgba(127,127,127,.9); }
+    #zam-toast { position: fixed; right: 14px; bottom: 12px; padding: 5px 11px; border-radius: 7px;
+      background: rgba(0,0,0,.8); color: #fff; font-size: 11.5px; opacity: 0;
+      transition: opacity .18s ease; pointer-events: none; z-index: 99; }
+    #zam-toast.show { opacity: 1; }
   </html:style>
 
-  <html:div class="zam-hero">
-    <html:div class="zam-hero-row">
-      <html:span class="zam-chip" id="zam-version">v—</html:span>
-      <html:span class="zam-status" id="zam-status">运行中</html:span>
-    </html:div>
-  </html:div>
+  <vbox class="main-section">
 
-  <vbox class="zam-card">
-    <html:div class="zam-sec">服务</html:div>
-    <checkbox id="ab-enabled" label="启用服务（所有功能默认开放）"/>
-    <html:div class="zam-div"/>
-    <hbox align="center">
-      <html:span class="zam-label">访问令牌</html:span>
-      <html:input id="ab-token" class="zam-token" type="text" readonly="readonly"/>
-      <button id="ab-regen" label="重新生成"/>
-      <button id="ab-copy-token" label="复制令牌"/>
-    </hbox>
-    <html:div class="zam-hint">请求头：Authorization: Bearer &lt;令牌&gt;（或 X-Agent-Token）</html:div>
-  </vbox>
-
-  <vbox class="zam-card">
-    <html:div class="zam-sec">功能权限</html:div>
-    <hbox>
-      <vbox class="zam-col" flex="1">
-        <checkbox id="ab-scope-read" label="read"/>
-        <checkbox id="ab-scope-fulltext" label="fulltext"/>
-        <checkbox id="ab-scope-annotations" label="annotations"/>
+    <hbox align="center" style="margin-bottom: 4px;">
+      <html:img id="zam-logo" width="30" height="30" style="border-radius:7px;margin-right:10px" alt=""/>
+      <vbox flex="1">
+        <hbox align="center">
+          <html:span class="zam-title">Zotero-Agent-MCP</html:span>
+          <html:span class="zam-chip" id="zam-version">v—</html:span>
+        </hbox>
+        <html:span class="zam-mono" id="zam-url">—</html:span>
       </vbox>
-      <vbox class="zam-col" flex="1">
-        <checkbox id="ab-scope-export" label="export"/>
-        <checkbox id="ab-scope-write" label="write"/>
-        <checkbox id="ab-scope-files" label="files"/>
+      <html:span class="zam-pill" id="zam-status">运行中</html:span>
+    </hbox>
+
+    <groupbox>
+      <label><html:h2>服务</html:h2></label>
+      <checkbox id="ab-enabled" label="启用服务" native="true"/>
+      <separator class="thin"/>
+      <hbox align="center">
+        <label value="令牌" control="ab-token"/>
+        <html:input id="ab-token" type="text" class="zam-mono" readonly="readonly"
+                    spellcheck="false" style="flex:1;min-width:150px"/>
+        <button id="ab-toggle-token" label="显示"/>
+        <button id="ab-copy-token" label="复制"/>
+        <button id="ab-regen" label="重置"/>
+      </hbox>
+      <description id="zam-token-hint">请求头 Authorization: Bearer &lt;令牌&gt;</description>
+    </groupbox>
+
+    <groupbox>
+      <label><html:h2>接入 agent</html:h2></label>
+      <hbox align="center">
+        <description id="zam-client-summary" flex="1">检测中…</description>
+        <button id="ab-apply-all" label="全部接入"/>
+        <button id="ab-test" label="连接测试"/>
+      </hbox>
+      <vbox id="zam-clients"/>
+      <checkbox id="ab-autosync" label="启动时自动同步已安装的客户端" native="true"/>
+      <hbox align="center" style="margin-top:6px">
+        <button id="ab-skill-install" label="安装 skill"/>
+        <button id="ab-skill-undo" label="撤销 skill"/>
+        <html:span class="zam-hint" id="zam-skill-result" style="margin-left:8px"/>
+      </hbox>
+      <description id="zam-test-result"/>
+    </groupbox>
+
+    <groupbox>
+      <label><html:h2>高级</html:h2></label>
+      <hbox align="center">
+        <description flex="1">权限 · 库白名单 · 速率 · 审计 · 备份与撤销</description>
+        <button id="ab-adv-toggle" label="展开"/>
+      </hbox>
+
+      <vbox id="zam-advanced" hidden="true">
+        <separator class="thin"/>
+        <hbox>
+          <vbox flex="1">
+            <checkbox id="ab-scope-read" label="读取" native="true"/>
+            <checkbox id="ab-scope-fulltext" label="全文" native="true"/>
+            <checkbox id="ab-scope-annotations" label="批注" native="true"/>
+          </vbox>
+          <vbox flex="1">
+            <checkbox id="ab-scope-export" label="引文 / 导出" native="true"/>
+            <checkbox id="ab-scope-write" label="写入" native="true"/>
+            <checkbox id="ab-scope-files" label="附件下载" native="true"/>
+          </vbox>
+        </hbox>
+
+        <separator class="thin"/>
+        <hbox align="center">
+          <label value="允许的库" control="ab-libs"/>
+          <html:input id="ab-libs" type="text" style="flex:1;min-width:180px" placeholder="留空 = 全部"/>
+        </hbox>
+        <hbox align="center">
+          <label value="速率（次/分）" control="ab-rate"/>
+          <html:input id="ab-rate" type="number" min="0" max="100000" style="width:90px"/>
+          <checkbox id="ab-audit" label="审计日志" native="true"/>
+          <spacer flex="1"/>
+          <button id="ab-open-audit" label="打开日志"/>
+        </hbox>
+        <description id="zam-audit-path" class="zam-mono"/>
+
+        <separator class="thin"/>
+        <hbox align="center">
+          <button id="ab-revert-all" label="撤销全部接入"/>
+          <button id="ab-copy-mcp" label="复制 mcpServers"/>
+          <button id="ab-copy-curl" label="复制 curl"/>
+          <button id="ab-open-bridge" label="打开目录"/>
+        </hbox>
+        <description id="zam-bridge-path" class="zam-mono"/>
+        <description id="zam-node-path" class="zam-hint"/>
       </vbox>
-    </hbox>
-    <html:div class="zam-div"/>
-    <hbox align="center">
-      <html:span class="zam-label">允许的库</html:span>
-      <html:input id="ab-libs" type="text" style="flex: 1;" placeholder="libraryID，逗号分隔，留空 = 全部"/>
-    </hbox>
-    <hbox align="center" style="margin-top: 8px;">
-      <html:span class="zam-label">速率限制</html:span>
-      <html:input id="ab-rate" type="number" min="0" max="100000" style="width: 90px;"/>
-      <html:span class="zam-hint-inline">请求 / 分钟，0 = 不限</html:span>
-    </hbox>
+    </groupbox>
+
   </vbox>
 
-  <vbox class="zam-card">
-    <html:div class="zam-sec">接入 AI agent</html:div>
-    <hbox align="center">
-      <button id="ab-copy-mcp" label="复制 MCP 配置 JSON"/>
-      <button id="ab-copy-gemini" label="复制 Gemini App 命令"/>
-      <button id="ab-copy-curl" label="复制 curl 示例"/>
-      <button id="ab-open-bridge" label="打开桥接目录"/>
-    </hbox>
-    <html:div class="zam-hint">Gemini App（本地 MCP）：粘贴 npx 命令即可，支持默认沙盒模式</html:div>
-  </vbox>
-
-  <vbox class="zam-card">
-    <html:div class="zam-sec">审计</html:div>
-    <hbox align="center">
-      <checkbox id="ab-audit" label="记录访问审计日志（推荐开启）" style="flex: 1;"/>
-      <button id="ab-open-audit" label="查看日志"/>
-    </hbox>
-  </vbox>
-
+  <html:div id="zam-toast"/>
 </vbox>
