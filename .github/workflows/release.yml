@@ -173,7 +173,8 @@ jobs:
           fi
 
           echo "NPM_TOKEN secret is not set; attempting npm Trusted Publishing (OIDC)..."
-          if npm publish --provenance --access public; then
+          echo "OIDC env: url=$( [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] && echo set || echo unset ), token=$( [ -n "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ] && echo set || echo unset )"
+          if npm publish --access public --loglevel verbose; then
             echo "Published ${PKG_NAME}@${VERSION} using npm OIDC Trusted Publishing."
             exit 0
           fi
