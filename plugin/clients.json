@@ -162,6 +162,8 @@
       "detectPaths": [
         "~/Library/Application Support/Code",
         "~/.config/Code",
+        "%APPDATA%/Code",
+        "~/.vscode",
         "/Applications/Visual Studio Code.app"
       ],
       "skillDir": "",
@@ -180,12 +182,14 @@
           "~/.config/opencode/opencode.json"
         ],
         "win32": [
+          "%USERPROFILE%/.config/opencode/opencode.json",
           "%APPDATA%/opencode/opencode.json"
         ]
       },
       "detectPaths": [
         "~/.config/opencode",
         "~/.opencode",
+        "%APPDATA%/opencode",
         "/Applications/OpenCode.app"
       ],
       "skillDir": "",

@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Check JS/MJS syntax
+        run: |
+          node --check plugin/zotero-agent-mcp.js
+          node --check plugin/bootstrap.js
+          node --check plugin/prefs.js
+          node --check bridge/zotero-agent-mcp.mjs
+
+      - name: Run Windows path & config merge tests
+        run: |
+          node tools/test_windows_paths.mjs
+          node tools/test_config_merge.mjs
+
+      - name: Run bridge benchmark smoke test
+        run: node tools/bench.mjs --runs=3
+
+      - name: Verify version consistency
+        run: |
+          node -e '
+            const fs = require("fs");
+            const pkg = JSON.parse(fs.readFileSync("package.json", "utf8")).version;
+            const man = JSON.parse(fs.readFileSync("plugin/manifest.json", "utf8")).version;
+            const bridge = fs.readFileSync("bridge/zotero-agent-mcp.mjs", "utf8").match(/const VERSION = "([^"]+)"/)?.[1];
+            console.log({ pkg, man, bridge });
+            if (!pkg || pkg !== man || pkg !== bridge) {
+              throw new Error(`Version mismatch: package=${pkg} manifest=${man} bridge=${bridge}`);
+            }
+          '
+
+      - name: Build XPI and verify embedded sources are up to date
+        run: |
+          bash tools/build.sh
+          git diff --exit-code plugin/bridge-source.js plugin/skill-source.js plugin/clients-source.js

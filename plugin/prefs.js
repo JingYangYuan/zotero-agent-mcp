@@ -1,4 +1,4 @@
-/* Zotero-Agent-MCP — preferences pane (v0.6.0)
+/* Zotero-Agent-MCP — preferences pane (v0.6.1)
  *
  * Layout: status → service/token → agent connect → advanced.
  * Client configs are written directly (merge-only, backed up, undoable);
@@ -49,7 +49,8 @@
     t.textContent = msg;
     t.classList.add("show");
     if (toastTimer) clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => t.classList.remove("show"), 1400);
+    let ms = msg && (msg.includes("失败") || msg.length > 24) ? 4000 : 1600;
+    toastTimer = setTimeout(() => t.classList.remove("show"), ms);
   }
 
   function copyText(str) {
@@ -205,7 +206,12 @@
       let results = await api().applyAllClientConfigs();
       let ok = results.filter((r) => r.ok).length;
       let failed = results.filter((r) => !r.ok && !r.skipped);
-      toast(`已接入 ${ok} 个` + (failed.length ? `，${failed.length} 个失败` : ""));
+      let msg = `已接入 ${ok} 个`;
+      if (failed.length) {
+        let first = failed[0];
+        msg += `，${failed.length} 个失败（${first.id}: ${first.error || "写入失败"}）`;
+      }
+      toast(msg);
     } catch (e) {
       Zotero.logError(e);
       toast("接入失败");

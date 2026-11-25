@@ -1,0 +1,190 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      skip_npm:
+        description: "Skip npm/npx publish job"
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  release-xpi:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Verify versions and tag
+        run: |
+          VERSION=$(node -e '
+            const fs = require("fs");
+            const pkg = JSON.parse(fs.readFileSync("package.json", "utf8")).version;
+            const man = JSON.parse(fs.readFileSync("plugin/manifest.json", "utf8")).version;
+            const bridge = fs.readFileSync("bridge/zotero-agent-mcp.mjs", "utf8").match(/const VERSION = "([^"]+)"/)?.[1];
+            if (!pkg || pkg !== man || pkg !== bridge) {
+              throw new Error(`Version mismatch: package=${pkg} manifest=${man} bridge=${bridge}`);
+            }
+            process.stdout.write(pkg);
+          ')
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "Resolved version: $VERSION"
+          if [ "${{ github.ref_type }}" = "tag" ] && [ "${{ github.ref_name }}" != "v${VERSION}" ]; then
+            echo "ERROR: Tag ${{ github.ref_name }} does not match v${VERSION}" >&2
+            exit 1
+          fi
+
+      - name: Run syntax, Windows path, config merge, and benchmark tests
+        run: |
+          node --check plugin/zotero-agent-mcp.js
+          node --check plugin/bootstrap.js
+          node --check plugin/prefs.js
+          node --check bridge/zotero-agent-mcp.mjs
+          node tools/test_windows_paths.mjs
+          node tools/test_config_merge.mjs
+          node tools/bench.mjs --runs=3
+
+      - name: Build XPI and verify embedded sources
+        run: |
+          bash tools/build.sh
+          git diff --exit-code plugin/bridge-source.js plugin/skill-source.js plugin/clients-source.js
+
+      - name: Generate update.json and release notes
+        run: |
+          node - <<'EOF'
+          const fs = require("fs");
+          const man = JSON.parse(fs.readFileSync("plugin/manifest.json", "utf8"));
+          const z = man.applications.zotero;
+          const repo = process.env.GITHUB_REPOSITORY;
+          const updateJson = {
+            addons: {
+              [z.id]: {
+                updates: [
+                  {
+                    version: man.version,
+                    update_link: `https://github.com/${repo}/releases/download/release/zotero-agent-mcp.xpi`,
+                    applications: {
+                      zotero: {
+                        strict_min_version: z.strict_min_version,
+                        strict_max_version: z.strict_max_version,
+                      },
+                    },
+                  },
+                ],
+              },
+            },
+          };
+          fs.writeFileSync("build/update.json", JSON.stringify(updateJson, null, 2) + "\n");
+
+          const changelog = fs.readFileSync("CHANGELOG.md", "utf8");
+          const lines = changelog.split(/\r?\n/);
+          const startIdx = lines.findIndex((l) => l === `## ${man.version}` || l.startsWith(`## ${man.version} `));
+          let notes = `Zotero-Agent-MCP v${man.version}`;
+          if (startIdx >= 0) {
+            let endIdx = lines.findIndex((l, i) => i > startIdx && /^## /.test(l));
+            if (endIdx < 0) endIdx = lines.length;
+            const body = lines.slice(startIdx + 1, endIdx).join("\n").trim();
+            if (body) notes = body;
+          }
+          fs.writeFileSync("build/release-notes.md", notes + "\n");
+          EOF
+
+      - name: Publish rolling 'release' and versioned 'v${{ env.VERSION }}' GitHub Releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git tag -f release "${GITHUB_SHA}"
+          git push -f origin release
+
+          if gh release view release >/dev/null 2>&1; then
+            gh release edit release --title "Zotero-Agent-MCP v${VERSION}" --notes-file build/release-notes.md
+            gh release upload release build/zotero-agent-mcp.xpi build/update.json --clobber
+          else
+            gh release create release build/zotero-agent-mcp.xpi build/update.json \
+              --title "Zotero-Agent-MCP v${VERSION}" --notes-file build/release-notes.md
+          fi
+
+          if ! git rev-parse -q --verify "refs/tags/v${VERSION}" >/dev/null; then
+            git tag "v${VERSION}" "${GITHUB_SHA}"
+            git push origin "v${VERSION}"
+          fi
+
+          if gh release view "v${VERSION}" >/dev/null 2>&1; then
+            gh release edit "v${VERSION}" --title "Zotero-Agent-MCP v${VERSION}" --notes-file build/release-notes.md
+            gh release upload "v${VERSION}" build/zotero-agent-mcp.xpi build/update.json --clobber
+          else
+            gh release create "v${VERSION}" build/zotero-agent-mcp.xpi build/update.json \
+              --title "Zotero-Agent-MCP v${VERSION}" --notes-file build/release-notes.md
+          fi
+
+      - name: Upload workflow build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: zotero-agent-mcp-v${{ env.VERSION }}
+          path: |
+            build/zotero-agent-mcp.xpi
+            build/update.json
+
+  publish-npm:
+    needs: release-xpi
+    if: ${{ inputs.skip_npm != true }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Publish package to npm (npx sync)
+        env:
+          NPM_TOKEN_SECRET: ${{ secrets.NPM_TOKEN }}
+        run: |
+          PKG_NAME=$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync("package.json","utf8")).name)')
+          VERSION=$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync("package.json","utf8")).version)')
+          echo "Package: ${PKG_NAME}@${VERSION}"
+
+          if npm view "${PKG_NAME}@${VERSION}" version >/dev/null 2>&1; then
+            echo "${PKG_NAME}@${VERSION} is already published on npm. Skipping."
+            exit 0
+          fi
+
+          if [ -n "${NPM_TOKEN_SECRET}" ]; then
+            npm config set "//registry.npmjs.org/:_authToken" "${NPM_TOKEN_SECRET}"
+            npm publish --access public
+            echo "Published ${PKG_NAME}@${VERSION} using NPM_TOKEN."
+            exit 0
+          fi
+
+          echo "NPM_TOKEN secret is not set; attempting npm Trusted Publishing (OIDC)..."
+          if npm publish --provenance --access public; then
+            echo "Published ${PKG_NAME}@${VERSION} using npm OIDC Trusted Publishing."
+            exit 0
+          fi
+
+          {
+            echo "### npm / npx publish requires authentication"
+            echo ""
+            echo "GitHub Release \`v${VERSION}\` (XPI + \`update.json\`) succeeded, but \`publish-npm\` could not authenticate with npmjs.org."
+            echo ""
+            echo "Configure **either** option and re-run the \`publish-npm\` job:"
+            echo "1. **Repository secret \`NPM_TOKEN\`**: Create a granular access token on npmjs.com with read/write access to \`${PKG_NAME}\`, add it at **Settings → Secrets and variables → Actions → \`NPM_TOKEN\`**, then re-run this job."
+            echo "2. **npm Trusted Publishing (OIDC, no token needed)**: On npmjs.com → \`${PKG_NAME}\` → **Settings → Trusted Publisher**, link GitHub repository \`${{ github.repository }}\` with workflow \`release.yml\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 1

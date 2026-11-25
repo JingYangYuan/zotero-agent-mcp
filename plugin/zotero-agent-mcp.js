@@ -794,17 +794,45 @@ var AgentMCP = new function () {
     nodePathCache = "";
     let exe = Zotero.isWin ? "node.exe" : "node";
     let dirs = [];
-    // Zotero 10 has no Services.env, so probe the usual install locations instead of PATH.
     let home = homeDirPath();
-    dirs.push("/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "C:\\Program Files\\nodejs");
-    if (home) {
-      for (let rel of [".local/bin", ".volta/bin", ".bun/bin", ".nvm/current/bin"]) {
-        try {
-          dirs.push(joinPath(home, rel));
-        } catch (e) {}
+    if (Zotero.isWin) {
+      let pathEnv = envVar("PATH");
+      if (pathEnv) {
+        for (let seg of pathEnv.split(";")) {
+          let d = seg.trim().replace(/^"+|"+$/g, "");
+          if (d) dirs.push(d);
+        }
+      }
+      let localApp = envVar("LOCALAPPDATA") || specialDir("LocalAppData", ["AppData", "Local"]);
+      let progFiles = envVar("ProgramFiles") || "C:\\Program Files";
+      let progFilesX86 = envVar("ProgramFiles(x86)") || "C:\\Program Files (x86)";
+      dirs.push(joinPath(progFiles, "nodejs"), joinPath(progFilesX86, "nodejs"));
+      if (localApp) dirs.push(joinPath(localApp, "Programs", "nodejs"));
+      if (home) {
+        for (let rel of [".volta/bin", "scoop/shims", ".bun/bin"]) {
+          try {
+            dirs.push(joinPath(home, rel));
+          } catch (e) {}
+        }
+      }
+    } else {
+      // Zotero 10 has no Services.env, so probe the usual install locations instead of PATH.
+      dirs.push("/opt/homebrew/bin", "/usr/local/bin", "/usr/bin");
+      if (home) {
+        for (let rel of [".local/bin", ".volta/bin", ".bun/bin", ".nvm/current/bin"]) {
+          try {
+            dirs.push(joinPath(home, rel));
+          } catch (e) {}
+        }
       }
     }
-    for (let dir of dirs) {
+    let seen = new Set();
+    for (let rawDir of dirs) {
+      let dir = normalizePath(rawDir);
+      if (!dir) continue;
+      let key = Zotero.isWin ? dir.toLowerCase() : dir;
+      if (seen.has(key)) continue;
+      seen.add(key);
       let candidate;
       try {
         candidate = joinPath(dir, exe);
@@ -864,31 +892,71 @@ var AgentMCP = new function () {
   }
   this.homeDir = homeDirPath;
   this.homeDirSource = () => homeDirSource;
+  function envVar(name) {
+    try {
+      let env = Components.classes["@mozilla.org/process/environment;1"].getService(
+        Components.interfaces.nsIEnvironment
+      );
+      if (env && env.exists(name)) return String(env.get(name) || "");
+    } catch (e) {}
+    return "";
+  }
+  function specialDir(key, fallbackParts) {
+    try {
+      let f = Services.dirsvc.get(key, Components.interfaces.nsIFile);
+      if (f && f.path) return String(f.path);
+    } catch (e) {}
+    let home = homeDirPath();
+    return home && fallbackParts && fallbackParts.length ? joinPath(home, ...fallbackParts) : "";
+  }
+  function normalizePath(p) {
+    if (!p) return "";
+    let s = String(p).trim();
+    if (!s) return "";
+    if (Zotero.isWin) {
+      let unc = s.startsWith("\\\\") || s.startsWith("//");
+      s = s.replace(/\//g, "\\");
+      s = unc ? "\\\\" + s.slice(2).replace(/\\+/g, "\\") : s.replace(/\\+/g, "\\");
+      if (s.length > 3 && s.endsWith("\\")) s = s.replace(/\\+$/, "");
+      return s;
+    }
+    s = s.replace(/\/+/g, "/");
+    if (s.length > 1 && s.endsWith("/")) s = s.replace(/\/+$/, "");
+    return s;
+  }
+  this.normalizePath = normalizePath;
   // Gecko's PathUtils.join throws on some multi-segment components, so append one
   // segment at a time and fall back to string concatenation.
   function joinPath(base, ...parts) {
-    let out = String(base || "");
+    let out = normalizePath(base);
+    let sep = Zotero.isWin ? "\\" : "/";
     for (let part of parts) {
       for (let seg of String(part).split(/[\\/]+/).filter(Boolean)) {
         let joined = null;
         try {
           joined = PathUtils.join(out, seg);
         } catch (e) {}
-        if (!joined) joined = out.replace(/[\\/]+$/, "") + (Zotero.isWin ? "\\" : "/") + seg;
+        if (!joined) joined = out ? (out.endsWith(sep) ? out : out + sep) + seg : seg;
         out = joined;
       }
     }
-    return out;
+    return normalizePath(out);
   }
   this.joinPath = joinPath;
 
   function parentDirPath(p) {
+    let norm = normalizePath(p);
+    if (!norm) return "";
     try {
-      if (typeof PathUtils.parent === "function") return PathUtils.parent(p);
+      if (typeof PathUtils.parent === "function") return normalizePath(PathUtils.parent(norm));
     } catch (e) {}
-    let norm = String(p).replace(/[\\/]+$/, "");
     let idx = Math.max(norm.lastIndexOf("/"), norm.lastIndexOf("\\"));
-    return idx > 0 ? norm.slice(0, idx) : norm;
+    if (idx > 0) {
+      let parent = norm.slice(0, idx);
+      if (Zotero.isWin && /^[A-Za-z]:$/.test(parent)) return parent + "\\";
+      return parent;
+    }
+    return norm;
   }
 
   function platformKey() {
@@ -899,24 +967,26 @@ var AgentMCP = new function () {
   function expandPath(p) {
     if (!p) return "";
     let s = String(p).trim();
-    if (s === "~") return homeDirPath();
-    if (s.startsWith("~/")) {
+    if (!s) return "";
+    if (!Zotero.isWin && /^%(USERPROFILE|APPDATA|LOCALAPPDATA)%/i.test(s)) return "";
+    if (s === "~") return normalizePath(homeDirPath());
+    if (s.startsWith("~/") || s.startsWith("~\\")) {
       let home = homeDirPath();
       s = home ? joinPath(home, s.slice(2)) : s.slice(2);
     }
     s = s.replace(/%([A-Za-z_]+)%/g, (m, name) => {
-      if (/^(HOME|USERPROFILE)$/i.test(name)) return homeDirPath() || m;
+      if (/^HOME$/i.test(name)) return homeDirPath() || m;
+      if (/^USERPROFILE$/i.test(name)) return envVar("USERPROFILE") || homeDirPath() || m;
       if (/^APPDATA$/i.test(name)) {
-        let home = homeDirPath();
-        return home ? joinPath(home, "AppData", "Roaming") : m;
+        return envVar("APPDATA") || specialDir("AppData", ["AppData", "Roaming"]) || m;
       }
       if (/^LOCALAPPDATA$/i.test(name)) {
-        let home = homeDirPath();
-        return home ? joinPath(home, "AppData", "Local") : m;
+        return envVar("LOCALAPPDATA") || specialDir("LocalAppData", ["AppData", "Local"]) || m;
       }
-      return m;
+      return envVar(name) || m;
     });
-    return s;
+    if (Zotero.isWin && (/^\/[^/]/.test(s) || /%[A-Za-z_]+%/.test(s))) return "";
+    return normalizePath(s);
   }
   this.expandPath = expandPath;
 
@@ -1027,13 +1097,26 @@ var AgentMCP = new function () {
         out.configured = new RegExp(`"${c.key}"\\s*:`).test(text);
         return out;
       }
-      let text = await IOUtils.readUTF8(existing);
+      let text = (await IOUtils.readUTF8(existing)).replace(/^\uFEFF/, "");
       if (c.format === "toml-codex") {
-        let re = new RegExp(`\\[mcp_servers\\."?${c.key}"?\\]([\\s\\S]*?)(\\n\\[|$)`);
-        let m = re.exec(text);
-        out.configured = !!m;
-        if (m) {
-          let tok = /ZOTERO_AGENT_TOKEN\s*=\s*"([^"]*)"/.exec(m[1]);
+        let headerRe = tomlHeaderRe(c.key);
+        let mainRe = new RegExp(
+          `^\\[mcp_servers\\."?${c.key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"?\\]\\s*$`
+        );
+        let inTarget = false;
+        let lines = [];
+        for (let line of text.split(/\r?\n/)) {
+          if (/^\s*\[/.test(line)) {
+            let trimmed = line.trim();
+            if (mainRe.test(trimmed)) out.configured = true;
+            inTarget = headerRe.test(trimmed);
+            continue;
+          }
+          if (inTarget) lines.push(line);
+        }
+        if (out.configured) {
+          let sec = lines.join("\n");
+          let tok = /ZOTERO_AGENT_TOKEN\s*=\s*"([^"]*)"/.exec(sec) || /"--token"\s*,\s*"([^"]*)"/.exec(sec);
           if (tok) out.tokenMatch = tok[1] === current;
         }
         return out;
@@ -1271,13 +1354,13 @@ var AgentMCP = new function () {
   }
 
   function tomlHeaderRe(key) {
-    return new RegExp("^\\[mcp_servers\\.\"?" + key.replace(/[.*+?^${}()|[\]\\]/g, "\\  // Ready-to-paste snippets for scripts/CI: one file, rewritten only when it changes.") + "\"?(\\.env)?\\]\\s*$");
+    return new RegExp("^\\[mcp_servers\\.\"?" + key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\"?(\\.env)?\\]\\s*$");
   }
   function tomlStripSection(text, key) {
     let headerRe = tomlHeaderRe(key);
     let kept = [];
     let skipping = false;
-    for (let line of text.split("\n")) {
+    for (let line of text.split(/\r?\n/)) {
       if (/^\s*\[/.test(line)) {
         skipping = headerRe.test(line.trim());
         if (skipping) continue;
@@ -1324,9 +1407,19 @@ var AgentMCP = new function () {
   }
 
   async function writeAtomic(path, text) {
-    let tmp = path + ".zotero-agent-mcp.tmp";
-    await IOUtils.writeUTF8(tmp, text);
-    await IOUtils.move(tmp, path);
+    let dest = normalizePath(path);
+    let tmp = dest + ".zotero-agent-mcp.tmp";
+    try {
+      await IOUtils.writeUTF8(dest, text, { tmpPath: tmp });
+    } catch (e) {
+      try {
+        await IOUtils.writeUTF8(tmp, text);
+        await IOUtils.move(tmp, dest);
+      } catch (e2) {
+        await IOUtils.remove(tmp, { ignoreAbsent: true }).catch(() => {});
+        throw e2;
+      }
+    }
   }
 
   async function entryForClient(c) {
@@ -1370,7 +1463,8 @@ var AgentMCP = new function () {
       if (c.format === "toml-codex") {
         next = remove ? tomlStripSection(original, c.key) : tomlSetSection(original, c.key, await entryForClient(c));
       } else {
-        let text = original.trim() ? original : "{}";
+        let cleanOriginal = original.replace(/^\uFEFF/, "");
+        let text = cleanOriginal.trim() ? cleanOriginal : "{}";
         if (!isParseableJson(text)) {
           return { id: c.id, ok: false, error: "现有配置不是合法 JSON，未改动" };
         }
@@ -1498,9 +1592,10 @@ var AgentMCP = new function () {
       let dir = expandPath(c.skillDir || "");
       if (!dir) continue;
       let parent = parentDirPath(dir);
+      let clientRoot = parentDirPath(parent);
       let parentExists = false;
       try {
-        parentExists = await IOUtils.exists(parent);
+        parentExists = (await IOUtils.exists(parent)) || (await IOUtils.exists(clientRoot));
       } catch (e) {}
       out.push({ id: c.id, label: c.label || c.id, dir, parentExists });
     }
@@ -1530,9 +1625,11 @@ var AgentMCP = new function () {
     let src = AgentMCP._skillSource;
     if (!src) return { dir: target.dir, ok: false, error: "skill source missing" };
     let parent = parentDirPath(target.dir);
-    if (!(await IOUtils.exists(parent))) {
+    let clientRoot = parentDirPath(parent);
+    if (!(await IOUtils.exists(parent)) && !(await IOUtils.exists(clientRoot))) {
       return { dir: target.dir, ok: false, error: "客户端目录不存在" };
     }
+    await IOUtils.makeDirectory(parent, { ignoreExisting: true });
     // Clean up a previous install of ours before recreating it.
     await removeSkillOne(target.dir, { quiet: true });
     let mode = "copy";
@@ -1685,7 +1782,7 @@ var AgentMCP = new function () {
       out.ms = Date.now() - t0;
       return out;
     }
-    let res = await runProcess(node, [bridge, "--selftest"], 15000);
+    let res = await runProcess(node, [bridge, "--url", baseUrl(), "--token", String(getPref("token") || ""), "--selftest"], 15000);
     out.ms = Date.now() - t0;
     if (!res || res.code !== 0) {
       out.error = (res && (res.stderr || "").trim()) || "自检失败";

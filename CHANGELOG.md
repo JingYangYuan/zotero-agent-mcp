@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.6.1 — 2026-11-25
+
+**Windows 路径与客户端接入修复 / CI 与自动发布流水线**
+
+### Windows 兼容性修复
+- 修复 `expandPath()`、`joinPath()`、`parentDirPath()` 与 `writeAtomic()` 在 Windows 上未将 `/` 统一归一化为 `\` 导致的 `NS_ERROR_FILE_UNRECOGNIZED_PATH`（`could not parse path`）错误，解决点击「接入」/「全部接入」及启动自动同步写入失败与状态漏检问题；优先使用 `IOUtils.writeUTF8(..., { tmpPath })` 原子写入并带 `move` 回退。
+- `clients.json` 补全 Windows 路径探测：`vs-code` 增加 `%APPDATA%/Code` 与 `~/.vscode`，`opencode` 增加 `%USERPROFILE%/.config/opencode/opencode.json` 与 `%APPDATA%/opencode` 探测。
+- 跳过 Windows 上无法识别的 Unix 路径（如 `/Applications/...`）与未展开的环境变量占位符；`nodePath()` 按平台拆分探测并在 Windows 上解析 `PATH`、`ProgramFiles(x86)`、`%LOCALAPPDATA%\Programs\nodejs` 与 `scoop\shims`。
+- 兼容 Windows 客户端配置文件可能携带的 UTF-8 BOM（`\uFEFF`）。
+- 桥接脚本 `bridge/zotero-agent-mcp.mjs` 的 `readFallbackToken()` 优先读取同目录 `token` 文件（兼容自定义 Zotero 数据目录），连接测试显式传入 `--url` 与 `--token`。
+
+### TOML / Skill / 面板改进
+- 修复 Codex CLI `tomlHeaderRe()` 中的字符转义错误，`tomlStripSection()` 与 `clientStatus()` 统一支持 `\r?\n` 并能跨 `[mcp_servers.zotero-agent.env]` 节正确检测令牌状态。
+- `skillTargets()` / `installSkillOne()` 当客户端根目录（如 `~/.claude`）存在但 `skills/` 子目录尚未创建时自动创建 `skills/` 后写入。
+- 偏好面板错误提示（toast）包含具体失败客户端及原因，并延长可读展示时间。
+
+### 构建与发布
+- 新增 GitHub Actions CI（`.github/workflows/ci.yml`）与自动发布工作流（`.github/workflows/release.yml`）：推送 `v*` 标签或手动触发即自动执行校验与测试、构建 `zotero-agent-mcp.xpi`、生成符合 Zotero 7+ 规范的 `update.json`（`update_link` + `applications.zotero`）、更新 GitHub Release 并同步发布到 npm（支持 `npx zotero-agent-mcp`）。
+- 新增 `tools/test_windows_paths.mjs` 覆盖 Windows/Unix 路径归一化、TOML 转义与 BOM 回归断言；`tools/build.sh` 在无 `zip` 命令环境下支持 Python `zipfile` 回退。
+
 ## 0.6.0 — 2026-11-23
 
 **性能 / 视觉 / 接入自动化**

@@ -75,5 +75,26 @@ EOF
 mkdir -p "$ROOT/build"
 rm -f "$ROOT/build/zotero-agent-mcp.xpi"
 cd "$ROOT/plugin"
-zip -q -r -X "$ROOT/build/zotero-agent-mcp.xpi" . -x "*.DS_Store" -x "clients.json"
+if command -v zip >/dev/null 2>&1; then
+  zip -q -r -X "$ROOT/build/zotero-agent-mcp.xpi" . -x "*.DS_Store" -x "clients.json"
+elif command -v python3 >/dev/null 2>&1 || command -v python >/dev/null 2>&1; then
+  PY="$(command -v python3 || command -v python)"
+  "$PY" - "$ROOT/plugin" "$ROOT/build/zotero-agent-mcp.xpi" <<'PYEOF'
+import os, sys, zipfile
+src, dest = sys.argv[1], sys.argv[2]
+with zipfile.ZipFile(dest, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+    for dirpath, _, filenames in os.walk(src):
+        for fn in sorted(filenames):
+            if fn == ".DS_Store":
+                continue
+            full = os.path.join(dirpath, fn)
+            rel = os.path.relpath(full, src).replace(os.sep, "/")
+            if rel == "clients.json":
+                continue
+            zf.write(full, rel)
+PYEOF
+else
+  echo "ERROR: neither 'zip' nor 'python' found to package .xpi" >&2
+  exit 1
+fi
 echo "Built: $ROOT/build/zotero-agent-mcp.xpi ($(wc -c < "$ROOT/build/zotero-agent-mcp.xpi" | tr -d ' ') bytes)"

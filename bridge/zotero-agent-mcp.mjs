@@ -19,8 +19,9 @@ import readline from "node:readline";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
-const VERSION = "0.6.0";
+const VERSION = "0.6.1";
 
 function parseArgs(argv) {
   const opts = { token: "", url: "", tools: "", help: false, version: false };
@@ -49,6 +50,7 @@ function parseArgs(argv) {
 
 function readFallbackToken() {
   const candidates = [
+    path.join(path.dirname(fileURLToPath(import.meta.url)), "token"),
     path.join(os.homedir(), "Zotero", "zotero-agent-mcp", "token"),
     path.join(os.homedir(), "Documents", "Zotero", "zotero-agent-mcp", "token"),
   ];
