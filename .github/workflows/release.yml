@@ -53,6 +53,7 @@ jobs:
           node --check bridge/zotero-agent-mcp.mjs
           node tools/test_windows_paths.mjs
           node tools/test_config_merge.mjs
+          node tools/test_mcp_pagination.mjs
           node tools/bench.mjs --runs=3
 
       - name: Build XPI and verify embedded sources

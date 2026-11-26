@@ -21,7 +21,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const VERSION = "0.6.2";
+const VERSION = "0.6.3";
 
 function parseArgs(argv) {
   const opts = { token: "", url: "", tools: "", help: false, version: false };
@@ -169,7 +169,7 @@ const TOOLS_ALL = [
   },
   {
     name: "zotero_search",
-    description: "Search title/creator/year; everything adds fulltext.",
+    description: "Search title/creator/year or fulltext.",
     annotations: RO,
     inputSchema: {
       type: "object",
@@ -178,18 +178,20 @@ const TOOLS_ALL = [
         library: LIB,
         mode: { type: "string", description: "title|everything" },
         tag: S,
-        item_type: { type: "string", description: "e.g. journalArticle" },
-        limit: { type: "number", description: "default 25" },
+        item_type: S,
+        collection: S,
+        recursive: B,
+        compact: B,
+        limit: N,
         offset: N,
       },
-      required: ["query"],
     },
   },
   {
     name: "zotero_recent",
     description: "Recent modified items.",
     annotations: RO,
-    inputSchema: { type: "object", properties: { library: LIB, limit: N } },
+    inputSchema: { type: "object", properties: { library: LIB, limit: N, offset: N, unfiled: B, compact: B } },
   },
   {
     name: "zotero_get_item",
@@ -204,17 +206,17 @@ const TOOLS_ALL = [
     inputSchema: {
       type: "object",
       properties: {
-        key: { type: "string", description: "item/attachment key" },
+        key: KEY,
         library: LIB,
-        offset: { type: "number", description: "nextOffset from previous call" },
-        max_chars: { type: "number", description: "default 200000" },
+        offset: N,
+        max_chars: { type: "number", description: "def 200000" },
       },
       required: ["key"],
     },
   },
   {
     name: "zotero_get_annotations",
-    description: "Highlights and annotation comments (color, page, comment).",
+    description: "Highlights and annotation comments.",
     annotations: RO,
     inputSchema: { type: "object", properties: { key: KEY, library: LIB }, required: ["key"] },
   },
@@ -226,15 +228,15 @@ const TOOLS_ALL = [
   },
   {
     name: "zotero_cite",
-    description: "Format a citation (CSL) or export bibtex/ris/csljson.",
+    description: "Format citation or export bibtex/ris/csljson.",
     annotations: RO,
     inputSchema: {
       type: "object",
       properties: {
         key: KEY,
         library: LIB,
-        format: { type: "string", description: "bibliography (default)|citation|bibtex|ris|csv|…" },
-        style: { type: "string", description: "default apa" },
+        format: { type: "string", description: "bibliography|citation|bibtex|ris|csv" },
+        style: S,
       },
       required: ["key"],
     },
@@ -246,15 +248,15 @@ const TOOLS_ALL = [
     inputSchema: {
       type: "object",
       properties: {
-        path: { type: "string", description: "absolute path" },
+        path: S,
         title: S,
-        item_type: { type: "string", description: "default document" },
+        item_type: S,
         fields: O,
         creators: CA,
         collections: A,
         tags: A,
-        mode: { type: "string", description: "import (default)|link" },
-        parent_key: { type: "string", description: "attach file to this item" },
+        mode: { type: "string", description: "import|link" },
+        parent_key: KEY,
         library: LIB,
         recognize: B,
       },
@@ -262,14 +264,14 @@ const TOOLS_ALL = [
   },
   {
     name: "zotero_set_item_collections",
-    description: "Replace/add/remove collection membership.",
+    description: "Set collections (auto-adds parent folders).",
     annotations: WD,
     inputSchema: {
       type: "object",
       properties: {
         key: KEY,
         collections: { type: "array", items: { type: "string" }, description: "empty+replace clears" },
-        mode: { type: "string", description: "replace (default)|add|remove" },
+        mode: { type: "string", description: "replace|add|remove" },
         library: LIB,
       },
       required: ["key", "collections"],
@@ -288,8 +290,8 @@ const TOOLS_ALL = [
         creators: CA,
         tags: A,
         collections: { type: "array", items: { type: "string" }, description: "[] unfiles" },
-        note: { type: "string", description: "note items only" },
-        deleted: { type: "boolean", description: "true = trash" },
+        note: S,
+        deleted: B,
         version: N,
         library: LIB,
       },
@@ -314,7 +316,7 @@ const TOOLS_ALL = [
     name: "zotero_get_trash",
     description: "List trashed items.",
     annotations: RO,
-    inputSchema: { type: "object", properties: { library: LIB, limit: N } },
+    inputSchema: { type: "object", properties: { library: LIB, limit: N, offset: N, compact: B } },
   },
   {
     name: "zotero_attach_file",
@@ -323,9 +325,9 @@ const TOOLS_ALL = [
     inputSchema: {
       type: "object",
       properties: {
-        key: { type: "string", description: "parent key" },
+        key: KEY,
         path: S,
-        mode: { type: "string", description: "import (default)|link" },
+        mode: { type: "string", description: "import|link" },
         title: S,
         recognize: B,
         library: LIB,
@@ -347,7 +349,7 @@ const TOOLS_ALL = [
       type: "object",
       properties: {
         name: S,
-        parent: { type: "string", description: "parent key/name; omit for top" },
+        parent: S,
         library: LIB,
       },
       required: ["name"],
@@ -360,7 +362,7 @@ const TOOLS_ALL = [
     inputSchema: {
       type: "object",
       properties: {
-        key: { type: "string", description: "collection key" },
+        key: KEY,
         name: S,
         parent: { type: ["string", "null"], description: "null = top level" },
         deleted: B,
@@ -376,7 +378,7 @@ const TOOLS_ALL = [
     inputSchema: {
       type: "object",
       properties: {
-        key: { type: "string", description: "collection key" },
+        key: KEY,
         permanent: B,
         library: LIB,
       },
@@ -387,27 +389,34 @@ const TOOLS_ALL = [
     name: "zotero_search_collections",
     description: "Find collections by name.",
     annotations: RO,
-    inputSchema: { type: "object", properties: { query: S, library: LIB }, required: ["query"] },
+    inputSchema: { type: "object", properties: { query: S, library: LIB, limit: N, offset: N }, required: ["query"] },
   },
   {
     name: "zotero_get_collection_items",
-    description: "List items in a collection.",
+    description: "List items in collection, root, or unfiled.",
     annotations: RO,
     inputSchema: {
       type: "object",
-      properties: { key: { type: "string", description: "collection key or name" }, library: LIB, limit: N },
+      properties: {
+        key: { type: "string", description: "key|name|root|unfiled" },
+        library: LIB,
+        recursive: B,
+        compact: B,
+        limit: N,
+        offset: N,
+      },
       required: ["key"],
     },
   },
   {
     name: "zotero_get_tags",
-    description: "List all tags used in a library.",
+    description: "List tags used in a library.",
     annotations: RO,
-    inputSchema: { type: "object", properties: { library: LIB } },
+    inputSchema: { type: "object", properties: { query: S, library: LIB, limit: N, offset: N } },
   },
   {
     name: "zotero_delete_tags",
-    description: "Remove tags library-wide (max 50 per call).",
+    description: "Remove tags library-wide (max 200).",
     annotations: DEL,
     inputSchema: {
       type: "object",
@@ -429,7 +438,7 @@ const TOOLS_ALL = [
       type: "object",
       properties: {
         name: S,
-        conditions: { type: "array", items: { type: "object" }, description: "e.g. {condition,operator,value}" },
+        conditions: CA,
         library: LIB,
       },
       required: ["name", "conditions"],
@@ -442,9 +451,9 @@ const TOOLS_ALL = [
     inputSchema: {
       type: "object",
       properties: {
-        key: { type: "string", description: "search key" },
+        key: KEY,
         name: S,
-        conditions: { type: "array", items: { type: "object" }, description: "full replacement" },
+        conditions: CA,
         library: LIB,
       },
       required: ["key"],
@@ -456,7 +465,7 @@ const TOOLS_ALL = [
     annotations: DEL,
     inputSchema: {
       type: "object",
-      properties: { key: { type: "string", description: "saved search key" }, library: LIB },
+      properties: { key: KEY, library: LIB },
       required: ["key"],
     },
   },
@@ -466,7 +475,7 @@ const TOOLS_ALL = [
     annotations: RO,
     inputSchema: {
       type: "object",
-      properties: { key: { type: "string", description: "saved search key" }, library: LIB, limit: N },
+      properties: { key: KEY, library: LIB, compact: B, limit: N, offset: N },
       required: ["key"],
     },
   },
@@ -486,8 +495,8 @@ const TOOLS_ALL = [
     inputSchema: {
       type: "object",
       properties: {
-        type: { type: "string", description: "items (default)|collections|searches|fulltext" },
-        since: { type: "number", description: "greater than this" },
+        type: { type: "string", description: "items|collections|searches|fulltext" },
+        since: N,
         library: LIB,
       },
     },
@@ -499,8 +508,8 @@ const TOOLS_ALL = [
     inputSchema: {
       type: "object",
       properties: {
-        key: { type: "string", description: "item or attachment key" },
-        content: { type: "string", description: "text to index" },
+        key: KEY,
+        content: S,
         library: LIB,
       },
       required: ["key", "content"],
@@ -513,8 +522,8 @@ const TOOLS_ALL = [
     inputSchema: {
       type: "object",
       properties: {
-        key: { type: "string", description: "parent item key" },
-        html: { type: "string", description: "text or simple HTML" },
+        key: KEY,
+        html: S,
         library: LIB,
       },
       required: ["key", "html"],
@@ -529,7 +538,7 @@ const TOOLS_ALL = [
       properties: {
         key: KEY,
         tag: S,
-        action: { type: "string", description: "add (default)|remove" },
+        action: { type: "string", description: "add|remove" },
         library: LIB,
       },
       required: ["key", "tag"],
@@ -574,12 +583,23 @@ async function callTool(name, args) {
           mode: args.mode,
           tag: args.tag,
           itemType: args.item_type,
+          collection: args.collection,
+          recursive: args.recursive,
+          compact: args.compact,
           limit: args.limit,
           offset: args.offset,
         },
       });
     case "zotero_recent":
-      return api("/items/recent", { query: { library: args.library, limit: args.limit } });
+      return api("/items/recent", {
+        query: {
+          library: args.library,
+          limit: args.limit,
+          offset: args.offset,
+          unfiled: args.unfiled,
+          compact: args.compact,
+        },
+      });
     case "zotero_get_item":
       return api(`/item/${encodeURIComponent(args.key)}`, { query: { library: args.library } });
     case "zotero_get_fulltext":
@@ -604,6 +624,7 @@ async function callTool(name, args) {
           fields: args.fields,
           creators: args.creators,
           collections: args.collections,
+          includeAncestors: args.include_ancestors,
           tags: args.tags,
           mode: args.mode,
           parentKey: args.parent_key,
@@ -614,7 +635,7 @@ async function callTool(name, args) {
     case "zotero_set_item_collections":
       return api(`/item/${encodeURIComponent(args.key)}/collections`, {
         method: "POST",
-        body: { collections: args.collections, mode: args.mode, library: args.library },
+        body: { collections: args.collections, mode: args.mode, includeAncestors: args.include_ancestors, library: args.library },
       });
     case "zotero_update_item":
       return api(`/item/${encodeURIComponent(args.key)}/update`, {
@@ -625,6 +646,7 @@ async function callTool(name, args) {
           creators: args.creators,
           tags: args.tags,
           collections: args.collections,
+          includeAncestors: args.include_ancestors,
           note: args.note,
           deleted: args.deleted,
           version: args.version,
@@ -637,7 +659,7 @@ async function callTool(name, args) {
         body: { permanent: args.permanent, library: args.library },
       });
     case "zotero_get_trash":
-      return api("/items/trash", { query: { library: args.library, limit: args.limit } });
+      return api("/items/trash", { query: { library: args.library, limit: args.limit, offset: args.offset, compact: args.compact } });
     case "zotero_attach_file":
       return api(`/item/${encodeURIComponent(args.key)}/attach`, {
         method: "POST",
@@ -661,11 +683,13 @@ async function callTool(name, args) {
         body: { permanent: args.permanent, library: args.library },
       });
     case "zotero_search_collections":
-      return api("/collections/search", { query: { q: args.query, library: args.library } });
+      return api("/collections/search", { query: { q: args.query, library: args.library, limit: args.limit, offset: args.offset } });
     case "zotero_get_collection_items":
-      return api(`/collection/${encodeURIComponent(args.key)}/items`, { query: { library: args.library, limit: args.limit } });
+      return api(`/collection/${encodeURIComponent(args.key)}/items`, {
+        query: { library: args.library, recursive: args.recursive, compact: args.compact, limit: args.limit, offset: args.offset },
+      });
     case "zotero_get_tags":
-      return api("/tags", { query: { library: args.library } });
+      return api("/tags", { query: { q: args.query, library: args.library, limit: args.limit, offset: args.offset } });
     case "zotero_delete_tags":
       return api("/tags/delete", { method: "POST", body: { tags: args.tags, library: args.library } });
     case "zotero_get_searches":
@@ -680,7 +704,9 @@ async function callTool(name, args) {
     case "zotero_delete_search":
       return api(`/search/${encodeURIComponent(args.key)}/delete`, { method: "POST", body: { library: args.library } });
     case "zotero_run_search":
-      return api(`/search/${encodeURIComponent(args.key)}/items`, { query: { library: args.library, limit: args.limit } });
+      return api(`/search/${encodeURIComponent(args.key)}/items`, {
+        query: { library: args.library, compact: args.compact, limit: args.limit, offset: args.offset },
+      });
     case "zotero_get_schema":
       return api("/schema", { query: { itemType: args.item_type } });
     case "zotero_versions":

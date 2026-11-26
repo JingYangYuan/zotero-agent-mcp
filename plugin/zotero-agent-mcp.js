@@ -308,6 +308,11 @@ var AgentMCP = new function () {
   this.allLibrariesJSON = allLibrariesJSON;
 
   // ---------- item serialization ----------
+  const COMPACT_ITEM_FIELDS = new Set([
+    "title", "shortTitle", "creators", "date", "publicationTitle", "bookTitle",
+    "proceedingsTitle", "DOI", "ISBN", "url", "tags", "collections", "parentItem",
+  ]);
+
   async function itemToJSON(item, opts = {}) {
     let d = {};
     try {
@@ -322,6 +327,7 @@ var AgentMCP = new function () {
     if (item.parentKey) out.parentKey = item.parentKey;
     for (let [k, v] of Object.entries(d)) {
       if (k === "itemType" || k === "version" || k in out) continue;
+      if (opts.compact && !COMPACT_ITEM_FIELDS.has(k)) continue;
       if (v === null || v === "" || (Array.isArray(v) && !v.length)) continue;
       out[k] = v;
     }
@@ -354,7 +360,7 @@ var AgentMCP = new function () {
   async function doSearch(libraryID, q, mode, tag, itemType) {
     let s = new Zotero.Search();
     s.libraryID = libraryID;
-    s.addCondition(mode, "contains", q);
+    if (q) s.addCondition(mode, "contains", q);
     if (tag) s.addCondition("tag", "is", tag);
     if (itemType) s.addCondition("itemType", "is", itemType);
     return s.search();
@@ -364,6 +370,37 @@ var AgentMCP = new function () {
     let n = parseInt(v, 10);
     if (isNaN(n)) return def;
     return Math.min(max, Math.max(min, n));
+  }
+
+  function boolParam(v) {
+    return v === true || v === "true" || v === "1" || v === 1;
+  }
+
+  function parseLimit(params, def = 25, max = 500, compact = false) {
+    let cap = compact ? Math.max(max, 1000) : max;
+    return clampInt(params.get("limit"), 1, cap, def);
+  }
+
+  function parseOffset(params) {
+    return clampInt(params.get("offset"), 0, 10000000, 0);
+  }
+
+  function pageMeta(total, offset, limit, pageLen) {
+    let nextOffset = offset + pageLen < total ? offset + pageLen : null;
+    return {
+      total,
+      offset,
+      limit,
+      hasMore: nextOffset !== null,
+      nextOffset,
+    };
+  }
+
+  function sortItemsDesc(items) {
+    return items.sort((a, b) => {
+      let dc = String(b.dateModified || "").localeCompare(String(a.dateModified || ""));
+      return dc !== 0 ? dc : String(b.key || "").localeCompare(String(a.key || ""));
+    });
   }
 
   async function findItem(libraryID, key, opts = {}) {
@@ -611,9 +648,12 @@ var AgentMCP = new function () {
       let notes = Zotero.Items.get(item.getNotes());
       for (let n of notes) {
         if (n.deleted) continue;
+        let fullText = htmlToText(n.getNote());
         out.notes.push({
           key: n.key,
-          text: htmlToText(n.getNote()).slice(0, 2000),
+          text: fullText.slice(0, 2000),
+          totalChars: fullText.length,
+          truncated: fullText.length > 2000,
           dateModified: n.dateModified,
         });
       }
@@ -625,6 +665,24 @@ var AgentMCP = new function () {
   async function collectionsJSON(libraryID) {
     // recursive=true — otherwise only top-level collections are returned
     let cols = Zotero.Collections.getByLibrary(libraryID, true);
+    let directByCol = new Map();
+    try {
+      let rows = await Zotero.DB.queryAsync(
+        `SELECT ci.collectionID AS cid, ci.itemID AS iid
+         FROM collectionItems ci
+         JOIN items i USING (itemID)
+         JOIN itemTypes it USING (itemTypeID)
+         WHERE i.libraryID = ?
+           AND it.typeName NOT IN ('note', 'attachment', 'annotation')
+           AND i.itemID NOT IN (SELECT itemID FROM deletedItems)`,
+        [libraryID]
+      );
+      for (let r of rows) {
+        let cid = Number(r.cid);
+        if (!directByCol.has(cid)) directByCol.set(cid, new Set());
+        directByCol.get(cid).add(Number(r.iid));
+      }
+    } catch (e) {}
     let byParent = new Map();
     let info = new Map();
     for (let c of cols) {
@@ -634,31 +692,60 @@ var AgentMCP = new function () {
       if (!byParent.has(p)) byParent.set(p, []);
       byParent.get(p).push(c);
     }
+    let recCache = new Map();
+    function recursiveItems(cid) {
+      if (recCache.has(cid)) return recCache.get(cid);
+      let merged = new Set(directByCol.get(cid) || []);
+      recCache.set(cid, merged);
+      for (let child of byParent.get(cid) || []) {
+        for (let iid of recursiveItems(child.id)) merged.add(iid);
+      }
+      return merged;
+    }
     function build(cid) {
       return (byParent.get(cid) || [])
         .sort((a, b) => String(a.name).localeCompare(String(b.name)))
-        .map((c) => ({
-          key: c.key,
-          name: c.name,
-          children: build(c.id),
-        }));
+        .map((c) => {
+          let direct = directByCol.get(c.id);
+          return {
+            key: c.key,
+            name: c.name,
+            itemCount: direct ? direct.size : 0,
+            totalItemCount: recursiveItems(c.id).size,
+            children: build(c.id),
+          };
+        });
     }
     return build(0);
   }
 
   // ---------- recent ----------
-  async function recentItems(libraryID, limit) {
+  async function recentItems(libraryID, limit, offset = 0, unfiled = false) {
+    let unfiledClause = unfiled
+      ? "AND i.itemID NOT IN (SELECT itemID FROM collectionItems)"
+      : "";
+    let countRows = await Zotero.DB.queryAsync(
+      `SELECT COUNT(*) AS cnt FROM items i
+       JOIN itemTypes it USING (itemTypeID)
+       WHERE i.libraryID = ?
+         AND it.typeName NOT IN ('note', 'attachment', 'annotation')
+         AND i.itemID NOT IN (SELECT itemID FROM deletedItems)
+         ${unfiledClause}`,
+      [libraryID]
+    );
+    let total = Number(countRows[0]?.cnt || 0);
     let rows = await Zotero.DB.queryAsync(
       `SELECT i.itemID AS itemID FROM items i
        JOIN itemTypes it USING (itemTypeID)
        WHERE i.libraryID = ?
          AND it.typeName NOT IN ('note', 'attachment', 'annotation')
          AND i.itemID NOT IN (SELECT itemID FROM deletedItems)
-       ORDER BY i.dateModified DESC LIMIT ?`,
-      [libraryID, limit]
+         ${unfiledClause}
+       ORDER BY i.dateModified DESC, i.key DESC LIMIT ? OFFSET ?`,
+      [libraryID, limit, offset]
     );
     let ids = rows.map((r) => r.itemID);
-    return Zotero.Items.getAsync(ids);
+    return { total, items: await Zotero.Items.getAsync(ids) };
   }
 
   // ---------- paths & small file helpers ----------
@@ -1902,55 +1989,138 @@ var AgentMCP = new function () {
 
   const hCollections = async (ctx) => {
     let libraryID = await resolveLibrary(ctx.params.get("library") || "user");
-    return { libraryID, collections: await collectionsJSON(libraryID) };
+    let totalItems = 0;
+    let unfiledItems = 0;
+    try {
+      let totRows = await Zotero.DB.queryAsync(
+        `SELECT COUNT(*) AS cnt FROM items i
+         JOIN itemTypes it USING (itemTypeID)
+         WHERE i.libraryID = ?
+           AND it.typeName NOT IN ('note', 'attachment', 'annotation')
+           AND i.itemID NOT IN (SELECT itemID FROM deletedItems)`,
+        [libraryID]
+      );
+      totalItems = Number(totRows[0]?.cnt || 0);
+      let unfRows = await Zotero.DB.queryAsync(
+        `SELECT COUNT(*) AS cnt FROM items i
+         JOIN itemTypes it USING (itemTypeID)
+         WHERE i.libraryID = ?
+           AND it.typeName NOT IN ('note', 'attachment', 'annotation')
+           AND i.itemID NOT IN (SELECT itemID FROM deletedItems)
+           AND i.itemID NOT IN (SELECT itemID FROM collectionItems)`,
+        [libraryID]
+      );
+      unfiledItems = Number(unfRows[0]?.cnt || 0);
+    } catch (e) {}
+    return { libraryID, totalItems, unfiledItems, collections: await collectionsJSON(libraryID) };
   };
 
   const hSearch = async (ctx) => {
     let q = (ctx.params.get("q") || "").trim();
-    if (!q) {
-      throw new ABError(400, "bad_request", "Missing 'q' query parameter (use /items/recent for recent items)");
+    let tag = (ctx.params.get("tag") || "").trim() || null;
+    let itemType = (ctx.params.get("itemType") || "").trim() || null;
+    let collection = (ctx.params.get("collection") || "").trim() || null;
+    if (!q && !tag && !itemType && !collection) {
+      throw new ABError(400, "bad_request", "Missing 'q' or filter parameter ('tag', 'itemType', 'collection')");
     }
     let libParam = ctx.params.get("library") || "user";
-    let limit = clampInt(ctx.params.get("limit"), 1, 100, 25);
-    let offset = clampInt(ctx.params.get("offset"), 0, 1000000, 0);
+    let compact = boolParam(ctx.params.get("compact"));
+    let recursive = boolParam(ctx.params.get("recursive"));
+    let limit = parseLimit(ctx.params, 25, 500, compact);
+    let offset = parseOffset(ctx.params);
     let mode = ctx.params.get("mode") === "everything" ? "quicksearch-everything" : "quicksearch-titleCreatorYear";
-    let tag = ctx.params.get("tag") || null;
-    let itemType = ctx.params.get("itemType") || null;
     let libs = [];
     if (libParam === "all") {
       for (let l of await allLibrariesJSON()) libs.push(l.id);
     } else {
       libs.push(await resolveLibrary(libParam));
     }
+    let seen = new Set();
     let all = [];
     for (let libraryID of libs) {
-      if (!q) continue;
+      let allowedColIDs = null;
+      let colTarget = null;
+      if (collection) {
+        if (libParam === "all") {
+          try {
+            colTarget = await resolveCollectionKeyOrName(libraryID, collection);
+          } catch (e) {
+            continue;
+          }
+        } else {
+          colTarget = await resolveCollectionKeyOrName(libraryID, collection);
+        }
+        allowedColIDs = recursive
+          ? descendantCollectionIDs(libraryID, colTarget.id)
+          : new Set([colTarget.id]);
+      }
+      if (!q && !tag && !itemType && allowedColIDs) {
+        for (let cid of allowedColIDs) {
+          let cObj = Zotero.Collections.get(cid);
+          if (!cObj || cObj.deleted) continue;
+          await ensureLoaded(cObj);
+          for (let ci of cObj.getChildItems(false, false)) {
+            if (!seen.has(ci.id)) {
+              seen.add(ci.id);
+              all.push(ci.id);
+            }
+          }
+        }
+        continue;
+      }
       let ids = await doSearch(libraryID, q, mode, tag, itemType);
-      all.push(...ids);
+      for (let id of ids) {
+        if (!seen.has(id)) {
+          seen.add(id);
+          all.push(id);
+        }
+      }
+      if (allowedColIDs) {
+        let filtered = [];
+        let libItems = await Zotero.Items.getAsync(all);
+        for (let it of libItems) {
+          if (it.libraryID !== libraryID) {
+            filtered.push(it.id);
+            continue;
+          }
+          let itemCols = it.getCollections();
+          if (itemCols.some((cid) => allowedColIDs.has(cid))) {
+            filtered.push(it.id);
+          }
+        }
+        all = filtered;
+      }
     }
     let items = await Zotero.Items.getAsync(all);
     items = items.filter((i) => i.isRegularItem() && !i.deleted);
-    items.sort((a, b) => String(b.dateModified).localeCompare(String(a.dateModified)));
+    sortItemsDesc(items);
     let total = items.length;
     let page = items.slice(offset, offset + limit);
     return {
       query: q,
       mode,
-      total,
-      offset,
-      limit,
-      hasMore: offset + page.length < total,
-      items: await Promise.all(page.map((i) => itemToJSON(i))),
+      ...(tag ? { tag } : {}),
+      ...(itemType ? { itemType } : {}),
+      ...(collection ? { collection, recursive } : {}),
+      compact,
+      ...pageMeta(total, offset, limit, page.length),
+      items: await Promise.all(page.map((i) => itemToJSON(i, { compact }))),
     };
   };
 
   const hRecent = async (ctx) => {
     let libraryID = await resolveLibrary(ctx.params.get("library") || "user");
-    let limit = clampInt(ctx.params.get("limit"), 1, 100, 20);
-    let items = await recentItems(libraryID, limit);
+    let compact = boolParam(ctx.params.get("compact"));
+    let unfiled = boolParam(ctx.params.get("unfiled"));
+    let limit = parseLimit(ctx.params, 20, 500, compact);
+    let offset = parseOffset(ctx.params);
+    let { total, items } = await recentItems(libraryID, limit, offset, unfiled);
     return {
       libraryID,
-      items: await Promise.all(items.map((i) => itemToJSON(i))),
+      ...(unfiled ? { unfiled: true } : {}),
+      compact,
+      ...pageMeta(total, offset, limit, items.length),
+      items: await Promise.all(items.map((i) => itemToJSON(i, { compact }))),
     };
   };
 
@@ -2045,13 +2215,71 @@ var AgentMCP = new function () {
   // With no `path`, creates a pure-metadata item (v0.5.0) — the common case for
   // literature ingest, where the agent has bibliographic data but no local file.
   async function resolveCollectionKeyOrName(libraryID, s) {
-    // recursive=true so nested subcollections resolve by key/name too
-    let cols = Zotero.Collections.getByLibrary(libraryID, true);
-    let c = cols.find((x) => !x.deleted && (x.key === s || x.name === s));
+    let raw = String(s || "");
+    try { raw = decodeURIComponent(raw); } catch (e) {}
+    raw = raw.trim();
+    // recursive=true so nested subcollections resolve by key/name/path too
+    let cols = Zotero.Collections.getByLibrary(libraryID, true).filter((x) => !x.deleted);
+    let byID = new Map(cols.map((x) => [x.id, x]));
+    function pathOf(col) {
+      let parts = [col.name];
+      let cur = col;
+      let guard = 0;
+      while (cur.parentID && byID.has(cur.parentID) && guard++ < 20) {
+        cur = byID.get(cur.parentID);
+        parts.unshift(cur.name);
+      }
+      return parts.join(" / ");
+    }
+    let c = cols.find((x) => x.key === raw || x.name === raw || pathOf(x) === raw);
     if (!c) {
-      throw new ABError(404, "not_found", `No collection '${s}' in library ${libraryID} (match by collection key or exact name)`);
+      throw new ABError(404, "not_found", `No collection '${raw}' in library ${libraryID} (match by collection key, exact name, or 'Parent / Child' path)`);
     }
     return c;
+  }
+
+  function descendantCollectionIDs(libraryID, rootID) {
+    let cols = Zotero.Collections.getByLibrary(libraryID, true).filter((x) => !x.deleted);
+    let childrenByParent = new Map();
+    for (let col of cols) {
+      let pid = col.parentID || 0;
+      if (!childrenByParent.has(pid)) childrenByParent.set(pid, []);
+      childrenByParent.get(pid).push(col.id);
+    }
+    let out = new Set([rootID]);
+    let stack = [rootID];
+    while (stack.length) {
+      let cur = stack.pop();
+      for (let cid of childrenByParent.get(cur) || []) {
+        if (!out.has(cid)) {
+          out.add(cid);
+          stack.push(cid);
+        }
+      }
+    }
+    return out;
+  }
+
+  function expandCollectionAncestors(ids, byID) {
+    let out = [];
+    let seen = new Set();
+    for (let startId of ids) {
+      let curId = startId;
+      let guard = 0;
+      while (curId && !seen.has(curId) && guard++ < 50) {
+        seen.add(curId);
+        out.push(curId);
+        let col = byID.get(curId);
+        curId = col && col.parentID ? col.parentID : 0;
+      }
+    }
+    return out;
+  }
+
+  function ancestorCollectionIDs(libraryID, ids) {
+    let cols = Zotero.Collections.getByLibrary(libraryID, true).filter((x) => !x.deleted);
+    let byID = new Map(cols.map((x) => [x.id, x]));
+    return expandCollectionAncestors(ids, byID);
   }
 
   // Shared metadata appliers, used by item creation and update alike.
@@ -2092,19 +2320,20 @@ var AgentMCP = new function () {
 
   function applyItemTags(item, tags) {
     if (!Array.isArray(tags)) return;
-    for (let t of tags.slice(0, 50)) {
+    for (let t of tags.slice(0, 200)) {
       let tag = String(t || "").trim();
       if (tag && !item.hasTag(tag)) item.addTag(tag);
     }
   }
 
-  async function applyItemCollections(item, libraryID, collections) {
+  async function applyItemCollections(item, libraryID, collections, opts = {}) {
     if (!Array.isArray(collections) || !collections.length) return;
-    let collectionIDs = [];
-    for (let c of collections.slice(0, 50)) {
+    let rawIDs = [];
+    for (let c of collections.slice(0, 200)) {
       let col = await resolveCollectionKeyOrName(libraryID, String(c));
-      collectionIDs.push(col.id);
+      rawIDs.push(col.id);
     }
+    let collectionIDs = opts.includeAncestors === false ? Array.from(new Set(rawIDs)) : ancestorCollectionIDs(libraryID, rawIDs);
     item.setCollections(collectionIDs);
   }
 
@@ -2162,7 +2391,7 @@ var AgentMCP = new function () {
       }
       item = new Zotero.Item(itemType);
       item.libraryID = libraryID;
-      let title = String(data.title || "").trim() || (fileName ? fileName.replace(/\.[^.]+$/, "") : "");
+      let title = String(data.title || (data.fields && data.fields.title) || "").trim() || (fileName ? fileName.replace(/\.[^.]+$/, "") : "");
       if (!title && !(data.fields && (data.fields.title || data.fields.shortTitle))) {
         throw new ABError(400, "bad_request", "creating an item without 'path' needs a 'title' (or fields.title); pass 'path' to build one from a local file");
       }
@@ -2170,7 +2399,7 @@ var AgentMCP = new function () {
       skippedFields = applyItemFields(item, data.fields);
       applyItemCreators(item, data.creators);
       applyItemTags(item, data.tags);
-      await applyItemCollections(item, libraryID, data.collections);
+      await applyItemCollections(item, libraryID, data.collections, { includeAncestors: data.includeAncestors !== false });
       await item.saveTx();
     }
 
@@ -2265,6 +2494,7 @@ var AgentMCP = new function () {
     if (!data.collections.length && mode !== "replace") {
       throw new ABError(400, "bad_request", "'collections' must be non-empty unless mode is 'replace' (which clears membership)");
     }
+    let includeAncestors = data.includeAncestors !== false;
     let seen = new Set();
     let ids = [];
     for (let c of data.collections.slice(0, 200)) {
@@ -2274,16 +2504,17 @@ var AgentMCP = new function () {
         ids.push(col.id);
       }
     }
+    let expanded = includeAncestors ? ancestorCollectionIDs(libraryID, ids) : ids;
     // setCollections dedupes, accepts ids/keys, and no-ops when unchanged;
     // add/remove are computed here so the whole change is a single saveTx.
     let before = item.getCollections().slice().sort((a, b) => a - b).join();
     let current = item.getCollections();
     let final;
     if (mode === "replace") {
-      final = ids;
+      final = expanded;
     } else if (mode === "add") {
       let cur = new Set(current);
-      final = current.concat(ids.filter((id) => !cur.has(id)));
+      final = current.concat(expanded.filter((id) => !cur.has(id)));
     } else {
       final = current.filter((id) => !seen.has(id));
     }
@@ -2385,6 +2616,8 @@ var AgentMCP = new function () {
     let libraryID = await resolveLibrary(ctx.params.get("library") || "user");
     let q = (ctx.params.get("q") || "").trim().toLowerCase();
     if (!q) throw new ABError(400, "bad_request", "Missing 'q' query parameter");
+    let limit = parseLimit(ctx.params, 50, 500, false);
+    let offset = parseOffset(ctx.params);
     let cols = Zotero.Collections.getByLibrary(libraryID, true).filter((c) => !c.deleted);
     let byID = new Map(cols.map((c) => [c.id, c]));
     function pathOf(c) {
@@ -2396,27 +2629,71 @@ var AgentMCP = new function () {
       }
       return parts.join(" / ");
     }
-    let matches = cols
-      .filter((c) => c.name.toLowerCase().includes(q))
-      .slice(0, 50)
-      .map((c) => ({ key: c.key, name: c.name, parentKey: c.parentKey || null, path: pathOf(c) }));
-    return { query: q, total: matches.length, collections: matches };
+    let all = cols
+      .map((c) => ({ key: c.key, name: c.name, parentKey: c.parentKey || null, path: pathOf(c) }))
+      .filter((c) => c.name.toLowerCase().includes(q) || c.path.toLowerCase().includes(q))
+      .sort((a, b) => a.path.localeCompare(b.path));
+    let total = all.length;
+    let page = all.slice(offset, offset + limit);
+    return { query: q, ...pageMeta(total, offset, limit, page.length), collections: page };
   };
 
   const hCollectionItems = async (ctx) => {
     let libraryID = await resolveLibrary(ctx.params.get("library") || "user");
-    // accept an 8-char key or an exact collection name
-    let col = /^[A-Z0-9]{8}$/.test(String(ctx.pathParams.key))
-      ? await findCollection(libraryID, ctx.pathParams.key)
-      : await resolveCollectionKeyOrName(libraryID, String(ctx.pathParams.key));
+    let rawKey = String(ctx.pathParams.key || "");
+    try { rawKey = decodeURIComponent(rawKey); } catch (e) {}
+    rawKey = rawKey.trim();
+    let compact = boolParam(ctx.params.get("compact"));
+    let recursive = boolParam(ctx.params.get("recursive"));
+    let limit = parseLimit(ctx.params, 50, 500, compact);
+    let offset = parseOffset(ctx.params);
+    let lower = rawKey.toLowerCase();
+    if (lower === "root" || lower === "all" || lower === "unfiled") {
+      let isUnfiled = lower === "unfiled";
+      let { total, items } = await recentItems(libraryID, limit, offset, isUnfiled);
+      return {
+        key: isUnfiled ? "unfiled" : "root",
+        name: isUnfiled ? "Unfiled Items" : "All Library Items",
+        libraryID,
+        compact,
+        ...pageMeta(total, offset, limit, items.length),
+        items: await Promise.all(items.map((i) => itemToJSON(i, { compact }))),
+      };
+    }
+    // accept an 8-char key, exact collection name, or 'Parent / Child' path
+    let col = /^[A-Z0-9]{8}$/.test(rawKey)
+      ? await findCollection(libraryID, rawKey)
+      : await resolveCollectionKeyOrName(libraryID, rawKey);
     await ensureLoaded(col);
-    let limit = clampInt(ctx.params.get("limit"), 1, 100, 50);
-    let items = col.getChildItems(false, false).filter((i) => !i.deleted && i.isRegularItem());
+    let items;
+    if (recursive) {
+      let colIDs = descendantCollectionIDs(libraryID, col.id);
+      let byID = new Map();
+      for (let cid of colIDs) {
+        let cObj = Zotero.Collections.get(cid);
+        if (!cObj || cObj.deleted) continue;
+        await ensureLoaded(cObj);
+        for (let ci of cObj.getChildItems(false, false)) {
+          if (!ci.deleted && ci.isRegularItem() && !byID.has(ci.id)) {
+            byID.set(ci.id, ci);
+          }
+        }
+      }
+      items = Array.from(byID.values());
+    } else {
+      items = col.getChildItems(false, false).filter((i) => !i.deleted && i.isRegularItem());
+    }
+    sortItemsDesc(items);
+    let total = items.length;
+    let page = items.slice(offset, offset + limit);
     return {
       key: col.key,
       name: col.name,
-      total: items.length,
-      items: await Promise.all(items.slice(0, limit).map((i) => itemToJSON(i))),
+      libraryID,
+      ...(recursive ? { recursive: true } : {}),
+      compact,
+      ...pageMeta(total, offset, limit, page.length),
+      items: await Promise.all(page.map((i) => itemToJSON(i, { compact }))),
     };
   };
 
@@ -2446,7 +2723,7 @@ var AgentMCP = new function () {
     if (data.collections !== undefined && data.collections !== null) {
       if (!Array.isArray(data.collections)) throw new ABError(400, "bad_request", "'collections' must be an array of collection keys or exact names");
       if (!data.collections.length) item.setCollections([]); // empty array clears membership
-      else await applyItemCollections(item, libraryID, data.collections);
+      else await applyItemCollections(item, libraryID, data.collections, { includeAncestors: data.includeAncestors !== false });
     }
     if (data.note !== undefined && data.note !== null && item.isNote()) {
       item.setNote(String(data.note).slice(0, MAX_NOTE_CHARS));
@@ -2481,18 +2758,29 @@ var AgentMCP = new function () {
 
   const hTrash = async (ctx) => {
     let libraryID = await resolveLibrary(ctx.params.get("library") || "user");
-    let limit = clampInt(ctx.params.get("limit"), 1, 100, 50);
+    let compact = boolParam(ctx.params.get("compact"));
+    let limit = parseLimit(ctx.params, 50, 500, compact);
+    let offset = parseOffset(ctx.params);
+    let countRows = await Zotero.DB.queryAsync(
+      `SELECT COUNT(*) AS cnt FROM items i
+       JOIN deletedItems d USING (itemID)
+       WHERE i.libraryID = ?`,
+      [libraryID]
+    );
+    let total = Number(countRows[0]?.cnt || 0);
     let rows = await Zotero.DB.queryAsync(
       `SELECT i.itemID AS itemID FROM items i
        JOIN deletedItems d USING (itemID)
        WHERE i.libraryID = ?
-       ORDER BY d.dateDeleted DESC LIMIT ?`,
-      [libraryID, limit]
+       ORDER BY d.dateDeleted DESC, i.key DESC LIMIT ? OFFSET ?`,
+      [libraryID, limit, offset]
     );
     let items = await Zotero.Items.getAsync(rows.map((r) => r.itemID));
     return {
       libraryID,
-      items: await Promise.all(items.map((i) => itemToJSON(i))),
+      compact,
+      ...pageMeta(total, offset, limit, items.length),
+      items: await Promise.all(items.map((i) => itemToJSON(i, { compact }))),
     };
   };
 
@@ -2539,22 +2827,33 @@ var AgentMCP = new function () {
   // ---------- tags (library-wide, v0.5.0) ----------
   const hTags = async (ctx) => {
     let libraryID = await resolveLibrary(ctx.params.get("library") || "user");
+    let q = (ctx.params.get("q") || "").trim().toLowerCase();
+    let limit = parseLimit(ctx.params, 500, 5000, false);
+    let offset = parseOffset(ctx.params);
     let tags = await Zotero.Tags.getAll(libraryID);
-    let out = tags
+    let all = tags
       .map((t) => (t && typeof t === "object" ? { tag: t.tag, type: t.type ?? null } : { tag: String(t), type: null }))
-      .slice(0, 1000);
-    return { libraryID, total: out.length, tags: out };
+      .filter((t) => !q || t.tag.toLowerCase().includes(q))
+      .sort((a, b) => a.tag.localeCompare(b.tag));
+    let total = all.length;
+    let page = all.slice(offset, offset + limit);
+    return {
+      libraryID,
+      ...(q ? { query: q } : {}),
+      ...pageMeta(total, offset, limit, page.length),
+      tags: page,
+    };
   };
 
   const hDeleteTags = async (ctx) => {
-    if (ctx.method !== "POST") throw new ABError(400, "bad_request", "POST JSON {tags: [name, …] (max 50), library?}");
+    if (ctx.method !== "POST") throw new ABError(400, "bad_request", "POST JSON {tags: [name, …] (max 200), library?}");
     let data = ctx.data || {};
     let libraryID = await resolveLibrary(data.library || "user");
     requireEditable(libraryID);
     if (!Array.isArray(data.tags) || !data.tags.length) {
       throw new ABError(400, "bad_request", "'tags' must be a non-empty array of tag names");
     }
-    let names = data.tags.slice(0, 50).map((t) => String(t || "").trim()).filter(Boolean);
+    let names = data.tags.slice(0, 200).map((t) => String(t || "").trim()).filter(Boolean);
     let tagIDs = names.map((n) => Zotero.Tags.getID(n)).filter((id) => !!id);
     if (tagIDs.length) {
       await Zotero.Tags.removeFromLibrary(libraryID, tagIDs);
@@ -2648,14 +2947,20 @@ var AgentMCP = new function () {
     let s = Zotero.Searches.getByLibraryAndKey(libraryID, ctx.pathParams.key);
     if (!s || s.deleted) throw new ABError(404, "not_found", `No saved search '${ctx.pathParams.key}' in library ${libraryID}`);
     await ensureLoaded(s);
-    let limit = clampInt(ctx.params.get("limit"), 1, 100, 50);
+    let compact = boolParam(ctx.params.get("compact"));
+    let limit = parseLimit(ctx.params, 50, 500, compact);
+    let offset = parseOffset(ctx.params);
     let ids = await s.search();
     let items = (await Zotero.Items.getAsync(ids)).filter((i) => i.isRegularItem() && !i.deleted);
+    sortItemsDesc(items);
+    let total = items.length;
+    let page = items.slice(offset, offset + limit);
     return {
       key: s.key,
       name: s.name,
-      total: items.length,
-      items: await Promise.all(items.slice(0, limit).map((i) => itemToJSON(i))),
+      compact,
+      ...pageMeta(total, offset, limit, page.length),
+      items: await Promise.all(page.map((i) => itemToJSON(i, { compact }))),
     };
   };
 

@@ -1,4 +1,4 @@
-/* Zotero-Agent-MCP — preferences pane (v0.6.2)
+/* Zotero-Agent-MCP — preferences pane (v0.6.3)
  *
  * Layout: status → service/token → agent connect → advanced.
  * Client configs are written directly (merge-only, backed up, undoable);

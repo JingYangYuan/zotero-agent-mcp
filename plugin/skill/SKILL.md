@@ -38,29 +38,29 @@ description: 本机 Zotero 文献库操作的统一通道：检索、读写元�
 |---|---|
 | 探活/版本/作用域 | `zotero_ping` |
 | 库列表（个人+群组） | `zotero_libraries` |
-| 集合树 | `zotero_collections` |
-| 按名搜集合（返回父链路径） | `zotero_search_collections` |
-| 集合内条目 | `zotero_get_collection_items`（key 或精确名） |
-| 检索条目（标题/作者/年份 或 mode=everything 全文） | `zotero_search` |
-| 最近修改条目 | `zotero_recent` |
+| 集合树（含各集合直接条目数 `itemCount` 与递归总数 `totalItemCount`，及全库/未分类总数） | `zotero_collections` |
+| 按名搜集合（支持 limit/offset 分页与路径匹配） | `zotero_search_collections` |
+| 集合/根库/未分类条目（支持 `key="root"`/`"unfiled"`、`recursive=true`、`compact=true`、`limit`/`offset` 分页） | `zotero_get_collection_items` |
+| 检索条目（`query` 可选，支持单独按 `tag`/`item_type`/`collection` 检索与分页、`compact=true`） | `zotero_search` |
+| 最近修改条目（支持 `limit`/`offset` 分页、`unfiled=true`、`compact=true`） | `zotero_recent` |
 | 单条完整元数据 | `zotero_get_item` |
 | 子附件/子笔记 | `zotero_get_children` |
 | PDF/EPUB 全文（分页 offset/max_chars） | `zotero_get_fulltext` |
 | 高亮与批注 | `zotero_get_annotations` |
 | 引文/导出（APA 等 CSL 样式、bibtex/ris/csljson/csv…） | `zotero_cite` |
 | 附件本地路径 | `zotero_get_attachment_path` |
-| 回收站列表 | `zotero_get_trash` |
+| 回收站列表（支持 `limit`/`offset`/`compact` 分页） | `zotero_get_trash` |
 | 字段名自省（写元数据前先查） | `zotero_get_schema` |
 | 增量版本（跨会话缓存） | `zotero_versions` |
-| 库内全部标签 | `zotero_get_tags` |
-| 保存的检索：列表/执行 | `zotero_get_searches` / `zotero_run_search` |
+| 库内标签（支持 `query` 过滤与 `limit`/`offset` 分页） | `zotero_get_tags` |
+| 保存的检索：列表/执行（支持 `limit`/`offset`/`compact`） | `zotero_get_searches` / `zotero_run_search` |
 
 ### 写入与整理
 | 任务 | 工具 |
 |---|---|
 | 建条目（可带 fields/creators/tags/collections 一次写全；path 可省略=纯元数据） | `zotero_add_item` |
 | **补/改元数据**（字段、作者、标签、集合、进/出回收站；可带 version 防冲突） | `zotero_update_item` |
-| 改条目集合归属（replace/add/remove） | `zotero_set_item_collections` |
+| 改条目集合归属（replace/add/remove；归入子分类时自动逐级加入直到第一层级父分类，保持上下层级数量一致） | `zotero_set_item_collections` |
 | 给既有条目挂本地文件 | `zotero_attach_file` |
 | 删条目（默认进回收站；permanent=true 永删） | `zotero_delete_item` |
 | 建集合（含子集合 parent） | `zotero_create_collection` |

@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.6.3 — 2026-11-26
+
+**MCP 数据完整拉取与分页修复 / 根集合与未分类枚举 / 实际使用优化**
+
+### 分页与数据完整性修复
+- 全部列表工具与 HTTP 端点（`zotero_search`、`zotero_recent`、`zotero_get_collection_items`、`zotero_get_trash`、`zotero_run_search`、`zotero_search_collections`、`zotero_get_tags`）统一支持 `offset` 与更大的 `limit`（常规上限 `500`，传 `compact=true` 时上限提升至 `1000`；`zotero_get_tags` 上限 `5000` 且支持 `query` 过滤）。
+- 分页响应统一返回 `total`、`offset`、`limit`、`hasMore`、`nextOffset` 元字段，并使用确定性倒序排序（`dateModified DESC, key DESC`），彻底解决此前单页上限 100 条且无法翻页的问题。
+
+### 根库、未分类与递归集合浏览
+- `zotero_get_collection_items` 新增 `key="root"` / `"all"`（遍历全库所有常规条目，包括未归入子集合的根级条目）及 `key="unfiled"`（仅未分类条目）。
+- `zotero_get_collection_items` 与 `zotero_search` 新增 `recursive=true` 递归包含子集合条目（自动去重），集合名/路径支持 URL 解码及 `"Parent / Child"` 完整路径匹配。
+- `zotero_collections` 在每个集合节点返回直接条目数 `itemCount` 与含子集合的去重总条目数 `totalItemCount`，并在顶层返回 `totalItems` 与 `unfiledItems`。
+- 通过 `zotero_add_item`、`zotero_update_item` 或 `zotero_set_item_collections`（`add`/`replace`）将文献归入子分类时，自动向上逐级加入直到第一层级父分类（保证上下级分类文献数一致；如需禁用可传 `includeAncestors: false`）。
+- `zotero_recent` 新增 `unfiled=true`、`offset` 与 `compact=true`。
+
+### 其它真实使用问题优化
+- 新增 `compact=true` 精简投影模式（剥离长摘要与 `extra` 等大字段），大幅降低大批量拉取时的上下文占用。
+- `zotero_search` 允许省略 `query`（在传入 `tag`、`item_type` 或 `collection` 时纯筛选检索）。
+- 修复 `zotero_add_item` 仅传 `fields.title` 而省略顶层 `title` 时被错误拒绝或丢失标题的问题；将标签/集合写入上限与 `zotero_delete_tags` 批量上限由 50 提升至 200；`childrenJSON` 子笔记返回新增 `totalChars` 与 `truncated` 提示。
+
 ## 0.6.2 — 2026-11-26
 
 **面板体验修复 / 20 个 Agent 客户端覆盖 / 移除限流**

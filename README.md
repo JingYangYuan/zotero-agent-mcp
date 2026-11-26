@@ -4,7 +4,7 @@
 在 Zotero 内置 HTTP 服务（`127.0.0.1:23119`）上注册 `/zotero-agent-mcp/` API，并提供**零依赖 MCP 桥（34 个工具）**与**内置 agent 路由 skill**。
 插件在进程内直调 Zotero 内部 API，**能力是 Zotero 本地 API 的超集**——agent 无需再绕行 `/api/**`。
 
-> **v0.6.2 重点**：自动覆盖 **20 种常见 AI agent 客户端**（合并写入、自动备份、可撤销、启动时自动同步令牌）；「接入 agent」内建显眼的手动接入复制与预览卡片；移除本地限流；`tools/list` 上下文成本 58.8%；配置默认本地 node 直启（握手 ~25ms）。
+> **v0.6.3 重点**：修复 MCP 全部分页与批量拉取限制（统一支持 `offset`/`limit`/`hasMore`/`nextOffset`、`compact=true` 单页最多 1000 条）；`zotero_get_collection_items` 支持 `key="root"`/`"unfiled"` 与 `recursive=true`；`zotero_collections` 返回 `itemCount`/`totalItems`/`unfiledItems`；支持 20 种 AI agent 客户端自动接入与无弹窗合并写入。
 
 ## 三步开始
 
@@ -81,10 +81,10 @@ curl -X POST -H "Authorization: Bearer <令牌>" -H "Content-Type: application/j
 |---|---|---|
 | 状态自检 | `GET /ping` ⇄ `zotero_ping` | 公开 |
 | 库列表（个人+群组） | `/libraries` ⇄ `zotero_libraries` | read |
-| 集合树 / 按名搜集合 | `/collections`、`/collections/search` ⇄ `zotero_collections`、`zotero_search_collections` | read |
-| 集合内条目 | `/collection/:key/items` ⇄ `zotero_get_collection_items` | read |
-| 检索（标题/作者/年份 或 全文） | `/search?q=` ⇄ `zotero_search` | read |
-| 最近条目 / 回收站 | `/items/recent`、`/items/trash` ⇄ `zotero_recent`、`zotero_get_trash` | read |
+| 集合树 / 按名搜集合 | `/collections`、`/collections/search` ⇄ `zotero_collections`、`zotero_search_collections`（含 `itemCount`/`totalItemCount` 与分页） | read |
+| 集合/根库/未分类条目 | `/collection/:key/items` ⇄ `zotero_get_collection_items`（支持 `root`/`unfiled`/`recursive`/`compact`/`limit`/`offset`） | read |
+| 检索（支持纯筛选 + 分页） | `/search` ⇄ `zotero_search`（支持 `collection`/`recursive`/`compact`/`limit`/`offset`） | read |
+| 最近条目 / 回收站 | `/items/recent`、`/items/trash` ⇄ `zotero_recent`、`zotero_get_trash`（均支持 `offset`/`compact` 分页） | read |
 | 条目完整元数据 | `/item/:key` ⇄ `zotero_get_item` | read |
 | PDF/EPUB 全文（分页） | `/item/:key/fulltext` ⇄ `zotero_get_fulltext` | fulltext |
 | 写全文索引（OCR 等） | `POST /item/:key/fulltext/set` ⇄ `zotero_set_fulltext` | fulltext |
@@ -94,7 +94,7 @@ curl -X POST -H "Authorization: Bearer <令牌>" -H "Content-Type: application/j
 | 附件原文件 / 本地路径 | `/item/:key/file`、`/item/:key/path` ⇄ `zotero_get_item`+`file`、`zotero_get_attachment_path` | files |
 | 建条目（文件或纯元数据） | `POST /item` ⇄ `zotero_add_item` | write |
 | 改条目 / 删条目 | `POST /item/:key/update|delete` ⇄ `zotero_update_item`、`zotero_delete_item` | write |
-| 改集合归属 | `POST /item/:key/collections` ⇄ `zotero_set_item_collections` | write |
+| 改集合归属（子分类自动同步加入至第一层级父分类） | `POST /item/:key/collections` ⇄ `zotero_set_item_collections` | write |
 | 给条目挂文件 | `POST /item/:key/attach` ⇄ `zotero_attach_file` | write |
 | 集合增改删 | `POST /collection`、`/collection/:key/update|delete` ⇄ `zotero_create_collection`、`zotero_update_collection`、`zotero_delete_collection` | write |
 | 笔记 / 标签 | `POST /note`、`/tag`、`/tags/delete` ⇄ `zotero_add_note`、`zotero_add_tag`、`zotero_delete_tags` | write |
