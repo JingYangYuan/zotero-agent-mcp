@@ -4,7 +4,7 @@
 在 Zotero 内置 HTTP 服务（`127.0.0.1:23119`）上注册 `/zotero-agent-mcp/` API，并提供**零依赖 MCP 桥（34 个工具）**与**内置 agent 路由 skill**。
 插件在进程内直调 Zotero 内部 API，**能力是 Zotero 本地 API 的超集**——agent 无需再绕行 `/api/**`。
 
-> **v0.6.0 重点**：设置面板极简化，**自动把 MCP 配置写进 9 种 agent 客户端**（合并写入、自动备份、可撤销、启动时自动同步令牌）；`tools/list` 上下文成本降到 58.8%；配置默认本地 node 直启（握手 ~25ms）；全套新图标。
+> **v0.6.2 重点**：自动覆盖 **20 种常见 AI agent 客户端**（合并写入、自动备份、可撤销、启动时自动同步令牌）；「接入 agent」内建显眼的手动接入复制与预览卡片；移除本地限流；`tools/list` 上下文成本 58.8%；配置默认本地 node 直启（握手 ~25ms）。
 
 ## 三步开始
 
@@ -17,14 +17,14 @@
 
 | 区块 | 内容 |
 |---|---|
-| 状态条 | 运行状态 · 版本 · 实际 `baseUrl`（跟随 Zotero 端口） |
+| 状态条 | 版本 · 运行状态 · 实际 `baseUrl`（跟随 Zotero 端口） |
 | 服务 | 启用开关 · 访问令牌（显示/复制/重新生成，重新生成需确认） |
-| 接入 agent | 9 个客户端逐行状态 + [更新]/[撤销] · 全部接入 · 连接测试 · 自动同步开关 · 安装/撤销 skill |
-| 高级设置（折叠） | 六个功能作用域（中文标签）· 库白名单 · 速率限制 · 审计日志 + 查看 · 桥接目录 · 通用 mcpServers / curl 复制 |
+| 接入 agent | 20 个客户端逐行状态（已安装优先置顶）+ [接入]/[更新]/[撤销] · 全部接入 · 连接测试 · 自动同步开关 · 安装/撤销 skill · 未覆盖客户端手动接入卡片（复制 `node`/`npx` 配置与展开预览） |
+| 高级设置（折叠） | 六个功能作用域（中文标签）· 库白名单 · 审计日志 + 查看 · 桥接目录 · 通用 curl 复制 |
 
 写入是**合并式**的：只增改 `zotero-agent` 这一条，其它条目与原有格式原样保留；首次改动前生成 `<配置文件>.zotero-agent-mcp.bak` 备份；高级里可「撤销全部接入」。
 
-## 客户端支持
+## 客户端支持（20 个）
 
 | 客户端 | 配置位置 | 写入格式 |
 |---|---|---|
@@ -33,10 +33,21 @@
 | Cursor | `~/.cursor/mcp.json` | `mcpServers` |
 | Codex CLI | `~/.codex/config.toml` | `[mcp_servers.zotero-agent]` TOML |
 | Gemini CLI | `~/.gemini/settings.json` | `mcpServers`（默认 npx 变体） |
+| Antigravity | `~/.gemini/config/mcp_config.json` / `~/.gemini/antigravity/mcp_config.json` | `mcpServers` |
+| WorkBuddy | `~/.workbuddy/mcp.json` | `mcpServers` |
+| GitHub Copilot CLI | `~/.copilot/mcp-config.json` | `mcpServers` |
+| Factory (Droid) | `~/.factory/mcp.json` | `mcpServers` |
+| Kimi Code | `~/.kimi-code/mcp.json` / `~/.kimi/mcp.json` | `mcpServers` |
+| Oh-My-Pi (OMP) | `~/.omp/agent/mcp.json` | `mcpServers` |
+| CommandCode | `~/.commandcode/mcp.json` | `mcpServers` |
+| Amp | `~/.config/amp/settings.json`（Win 兼容 `%APPDATA%\amp\settings.json`） | `amp.mcpServers` |
 | ZCode | `~/.zcode/cli/config.json` | `mcp.servers` |
 | VS Code | `~/Library/Application Support/Code/User/mcp.json` 或 `.vscode/mcp.json` | `servers` |
 | OpenCode | `~/.config/opencode/opencode.json` | `mcp`（`type: local`） |
 | Pi agent | `~/.pi/agent/mcp.json` | `mcpServers` |
+| Trae | `%APPDATA%\Trae\User\mcp.json` / `Trae CN` / `~/.trae/mcp.json` | `mcpServers` |
+| Windsurf | `~/.codeium/windsurf/mcp_config.json` | `mcpServers` |
+| Kiro | `~/.kiro/settings/mcp.json` | `mcpServers` |
 
 想加自己的客户端：在 `<Zotero 数据目录>/zotero-agent-mcp/clients.local.json` 里按 `clients.json` 的结构追加/覆盖（按 `id` 合并），面板会自动按新注册表写入。
 
@@ -92,7 +103,7 @@ curl -X POST -H "Authorization: Bearer <令牌>" -H "Content-Type: application/j
 | 字段名自省 | `/schema?itemType=` ⇄ `zotero_get_schema` | read |
 | 增量版本同步 | `/versions?type=&since=` ⇄ `zotero_versions` | read |
 
-`library` 参数：`user`（默认）/ 数字 libraryID / `all`（仅 search）。错误统一 `{error, message}`：401 未鉴权 / 403 越权 / 404 不存在 / 400 参数 / 409 只读库 / 415 无法提取 / 429 限流 / 503 插件被禁用。
+`library` 参数：`user`（默认）/ 数字 libraryID / `all`（仅 search）。错误统一 `{error, message}`：401 未鉴权 / 403 越权 / 404 不存在 / 400 参数 / 409 只读库 / 415 无法提取 / 503 插件被禁用。
 
 ## 安全模型
 
@@ -100,7 +111,7 @@ curl -X POST -H "Authorization: Bearer <令牌>" -H "Content-Type: application/j
 - 所有业务端点需 `Authorization: Bearer <令牌>`（或 `X-Agent-Token`）。
 - 六个作用域默认全开，可单独关闭；`write` 含条目/集合/笔记/标签的增改（删除默认进回收站，`permanent` 才真删）。
 - 客户端配置写入是合并式的（只动 `zotero-agent` 条目）、原子写入（临时文件 + rename）、保留原备份；关掉「启动时自动同步」即只在你点按钮时写。
-- 库白名单（留空=全部）、速率限制（默认 240 req/min）、全文分页与附件大小上限。
+- 库白名单（留空=全部）、全文分页与附件大小上限。
 - 审计日志 `~/Zotero/zotero-agent-mcp-audit.jsonl`（JSONL，可关；只记令牌前 4 位；超过 5MB 每天最多轮转一次）。
 
 ## 性能（本机 macOS，Zotero 10.0.9 / node v24）

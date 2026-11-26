@@ -1,6 +1,6 @@
 {
   "name": "zotero-agent-mcp",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "description": "Zero-dependency MCP bridge for Zotero-Agent-MCP (Claude, Cursor, Codex, Gemini, ZCode, VS Code)",
   "type": "module",
   "bin": {

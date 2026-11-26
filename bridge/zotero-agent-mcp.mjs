@@ -21,7 +21,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const VERSION = "0.6.1";
+const VERSION = "0.6.2";
 
 function parseArgs(argv) {
   const opts = { token: "", url: "", tools: "", help: false, version: false };

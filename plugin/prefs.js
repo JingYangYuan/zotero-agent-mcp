@@ -1,4 +1,4 @@
-/* Zotero-Agent-MCP — preferences pane (v0.6.1)
+/* Zotero-Agent-MCP — preferences pane (v0.6.2)
  *
  * Layout: status → service/token → agent connect → advanced.
  * Client configs are written directly (merge-only, backed up, undoable);
@@ -117,7 +117,12 @@
 
     let installed = 0;
     let connected = 0;
-    for (let s of state.statuses) {
+    let sorted = state.statuses.slice().sort((a, b) => {
+      let ai = a.detected || a.pathExists ? 0 : 1;
+      let bi = b.detected || b.pathExists ? 0 : 1;
+      return ai - bi;
+    });
+    for (let s of sorted) {
       if (s.detected) installed++;
       if (s.configured) connected++;
       let row = x("hbox", { class: "zam-client", align: "center" });
@@ -282,6 +287,23 @@
     });
   }
 
+  async function updateManualPreview() {
+    let pre = $("zam-manual-preview");
+    if (!pre || pre.hasAttribute("hidden")) return;
+    try {
+      let nodeEntry = await api().serverEntry("node");
+      let npxEntry = await api().serverEntry("npx");
+      let npxCmd = "npx " + npxEntry.args.join(" ");
+      pre.textContent =
+        "// 方式 1：本地 node 直启（推荐，mcpServers 通用 JSON）\n" +
+        JSON.stringify({ mcpServers: { "zotero-agent": nodeEntry } }, null, 2) +
+        "\n\n// 方式 2：npx 命令（沙盒 / 无路径环境）\n" +
+        npxCmd;
+    } catch (e) {
+      pre.textContent = "生成配置失败：" + String((e && e.message) || e);
+    }
+  }
+
   function curlExample() {
     const t = String(P("token") || "");
     const u = api().baseUrl();
@@ -346,10 +368,9 @@
       } catch (e) {}
     }
 
+    bindCheck("ab-enabled", "enabled", refreshStatus);
     refreshStatus();
     refreshTokenField();
-
-    $("ab-enabled")?.addEventListener("command", refreshStatus);
 
     $("ab-toggle-token")?.addEventListener("command", () => {
       state.tokenVisible = !state.tokenVisible;
@@ -363,6 +384,7 @@
       if (!ok) return;
       api().regenerateToken();
       refreshTokenField();
+      updateManualPreview();
       toast("令牌已重置，正在同步客户端");
       setTimeout(() => loadClients(true), 600);
     });
@@ -370,6 +392,35 @@
     $("ab-apply-all")?.addEventListener("command", applyAll);
     $("ab-test")?.addEventListener("command", runTest);
     bindCheck("ab-autosync", "autoSync");
+
+    $("ab-manual-node")?.addEventListener("command", async () => {
+      try {
+        let entry = await api().serverEntry("node");
+        copyAndToast(JSON.stringify({ mcpServers: { "zotero-agent": entry } }, null, 2), "已复制本地 node 配置");
+      } catch (e) {
+        toast("生成失败");
+      }
+    });
+    $("ab-manual-npx")?.addEventListener("command", async () => {
+      try {
+        let entry = await api().serverEntry("npx");
+        copyAndToast(JSON.stringify({ mcpServers: { "zotero-agent": entry } }, null, 2), "已复制 npx 配置");
+      } catch (e) {
+        toast("生成失败");
+      }
+    });
+    $("ab-manual-toggle")?.addEventListener("command", async () => {
+      let pre = $("zam-manual-preview");
+      if (!pre) return;
+      let show = pre.hasAttribute("hidden");
+      if (show) {
+        pre.removeAttribute("hidden");
+        await updateManualPreview();
+      } else {
+        pre.setAttribute("hidden", "hidden");
+      }
+      $("ab-manual-toggle").setAttribute("label", show ? "收起配置" : "查看配置");
+    });
 
     $("ab-skill-install")?.addEventListener("command", async () => {
       let btn = $("ab-skill-install");
@@ -413,7 +464,6 @@
     bindCheck("ab-scope-files", "scope-files");
     bindCheck("ab-audit", "audit");
     bindInput("ab-libs", "allowedLibraries", false);
-    bindInput("ab-rate", "rateLimit", true);
 
     $("ab-revert-all")?.addEventListener("command", async () => {
       let ok = Services.prompt.confirm(window, "Zotero-Agent-MCP", "从所有客户端配置中移除 zotero-agent（其余条目保留）。继续？");
@@ -425,14 +475,6 @@
         toast("撤销失败");
       }
       loadClients(true);
-    });
-    $("ab-copy-mcp")?.addEventListener("command", async () => {
-      try {
-        let entry = await api().serverEntry("node");
-        copyAndToast(JSON.stringify({ mcpServers: { "zotero-agent": entry } }, null, 2), "已复制");
-      } catch (e) {
-        toast("生成失败");
-      }
     });
     $("ab-copy-curl")?.addEventListener("command", () => copyAndToast(curlExample(), "已复制"));
     $("ab-open-bridge")?.addEventListener("command", () => openPath(api().bridgePath()));

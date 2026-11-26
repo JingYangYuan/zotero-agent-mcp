@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "_doc": "Client registry for the Zotero-Agent-MCP settings pane. Read-only detection: the plugin never writes these config files, it only inspects them and generates a snippet you copy. Users can override or extend this list with <Zotero data dir>/zotero-agent-mcp/clients.local.json (same shape, matched by id, merged on top).",
+  "_doc": "Client registry for the Zotero-Agent-MCP settings pane. Supports merge-only auto-connect and startup sync. Users can override or extend this list with <Zotero data dir>/zotero-agent-mcp/clients.local.json (same shape, matched by id, merged on top).",
   "clients": [
     {
       "id": "claude-code",
@@ -119,6 +119,201 @@
       "note": "默认沙盒无文件权限，推荐 npx 命令方式"
     },
     {
+      "id": "antigravity",
+      "label": "Antigravity",
+      "format": "json-mcpServers",
+      "paths": {
+        "darwin": [
+          "~/.gemini/config/mcp_config.json",
+          "~/.gemini/antigravity/mcp_config.json"
+        ],
+        "linux": [
+          "~/.gemini/config/mcp_config.json",
+          "~/.gemini/antigravity/mcp_config.json"
+        ],
+        "win32": [
+          "%USERPROFILE%/.gemini/config/mcp_config.json",
+          "%USERPROFILE%/.gemini/antigravity/mcp_config.json"
+        ]
+      },
+      "detectPaths": [
+        "~/.gemini/antigravity",
+        "~/.gemini/config/mcp_config.json",
+        "%APPDATA%/Antigravity",
+        "/Applications/Antigravity.app"
+      ],
+      "skillDir": "",
+      "prefer": "node",
+      "note": "合并进 mcp_config.json 的 mcpServers"
+    },
+    {
+      "id": "workbuddy",
+      "label": "WorkBuddy",
+      "format": "json-mcpServers",
+      "paths": {
+        "darwin": [
+          "~/.workbuddy/mcp.json"
+        ],
+        "linux": [
+          "~/.workbuddy/mcp.json"
+        ],
+        "win32": [
+          "%USERPROFILE%/.workbuddy/mcp.json"
+        ]
+      },
+      "detectPaths": [
+        "~/.workbuddy",
+        "~/.workbuddy/mcp.json",
+        "%LOCALAPPDATA%/WorkBuddy",
+        "/Applications/WorkBuddy.app"
+      ],
+      "skillDir": "~/.workbuddy/skills/zotero-agent",
+      "prefer": "node",
+      "note": "合并进 ~/.workbuddy/mcp.json 的 mcpServers"
+    },
+    {
+      "id": "copilot-cli",
+      "label": "GitHub Copilot CLI",
+      "format": "json-mcpServers",
+      "paths": {
+        "darwin": [
+          "~/.copilot/mcp-config.json"
+        ],
+        "linux": [
+          "~/.copilot/mcp-config.json"
+        ],
+        "win32": [
+          "%USERPROFILE%/.copilot/mcp-config.json"
+        ]
+      },
+      "detectPaths": [
+        "~/.copilot",
+        "~/.copilot/mcp-config.json"
+      ],
+      "skillDir": "~/.copilot/skills/zotero-agent",
+      "prefer": "node",
+      "note": "合并进 ~/.copilot/mcp-config.json 的 mcpServers"
+    },
+    {
+      "id": "factory",
+      "label": "Factory (Droid)",
+      "format": "json-mcpServers",
+      "paths": {
+        "darwin": [
+          "~/.factory/mcp.json"
+        ],
+        "linux": [
+          "~/.factory/mcp.json"
+        ],
+        "win32": [
+          "%USERPROFILE%/.factory/mcp.json"
+        ]
+      },
+      "detectPaths": [
+        "~/.factory",
+        "~/.factory/mcp.json"
+      ],
+      "skillDir": "",
+      "prefer": "node",
+      "note": "合并进 ~/.factory/mcp.json 的 mcpServers"
+    },
+    {
+      "id": "kimi-code",
+      "label": "Kimi Code",
+      "format": "json-mcpServers",
+      "paths": {
+        "darwin": [
+          "~/.kimi-code/mcp.json",
+          "~/.kimi/mcp.json"
+        ],
+        "linux": [
+          "~/.kimi-code/mcp.json",
+          "~/.kimi/mcp.json"
+        ],
+        "win32": [
+          "%USERPROFILE%/.kimi-code/mcp.json",
+          "%USERPROFILE%/.kimi/mcp.json"
+        ]
+      },
+      "detectPaths": [
+        "~/.kimi-code",
+        "~/.kimi"
+      ],
+      "skillDir": "~/.kimi-code/skills/zotero-agent",
+      "prefer": "node",
+      "note": "合并进 ~/.kimi-code/mcp.json 的 mcpServers"
+    },
+    {
+      "id": "omp",
+      "label": "Oh-My-Pi (OMP)",
+      "format": "json-mcpServers",
+      "paths": {
+        "darwin": [
+          "~/.omp/agent/mcp.json"
+        ],
+        "linux": [
+          "~/.omp/agent/mcp.json"
+        ],
+        "win32": [
+          "%USERPROFILE%/.omp/agent/mcp.json"
+        ]
+      },
+      "detectPaths": [
+        "~/.omp/agent",
+        "~/.omp"
+      ],
+      "skillDir": "~/.omp/agent/skills/zotero-agent",
+      "prefer": "node",
+      "note": "合并进 ~/.omp/agent/mcp.json 的 mcpServers"
+    },
+    {
+      "id": "commandcode",
+      "label": "CommandCode",
+      "format": "json-mcpServers",
+      "paths": {
+        "darwin": [
+          "~/.commandcode/mcp.json"
+        ],
+        "linux": [
+          "~/.commandcode/mcp.json"
+        ],
+        "win32": [
+          "%USERPROFILE%/.commandcode/mcp.json"
+        ]
+      },
+      "detectPaths": [
+        "~/.commandcode",
+        "~/.commandcode/mcp.json"
+      ],
+      "skillDir": "",
+      "prefer": "node",
+      "note": "合并进 ~/.commandcode/mcp.json 的 mcpServers"
+    },
+    {
+      "id": "amp",
+      "label": "Amp",
+      "format": "json-amp",
+      "paths": {
+        "darwin": [
+          "~/.config/amp/settings.json"
+        ],
+        "linux": [
+          "~/.config/amp/settings.json"
+        ],
+        "win32": [
+          "%USERPROFILE%/.config/amp/settings.json",
+          "%APPDATA%/amp/settings.json"
+        ]
+      },
+      "detectPaths": [
+        "~/.config/amp",
+        "%APPDATA%/amp"
+      ],
+      "skillDir": "",
+      "prefer": "node",
+      "note": "合并进 ~/.config/amp/settings.json 的 amp.mcpServers"
+    },
+    {
       "id": "zcode",
       "label": "ZCode",
       "format": "json-zcode",
@@ -217,6 +412,85 @@
       "skillDir": "~/.pi/agent/skills/zotero-agent",
       "prefer": "node",
       "note": "合并进 ~/.pi/agent/mcp.json 的 mcpServers"
+    },
+    {
+      "id": "trae",
+      "label": "Trae",
+      "format": "json-mcpServers",
+      "paths": {
+        "darwin": [
+          "~/Library/Application Support/Trae/User/mcp.json",
+          "~/Library/Application Support/Trae CN/User/mcp.json",
+          "~/.trae/mcp.json"
+        ],
+        "linux": [
+          "~/.config/Trae/User/mcp.json",
+          "~/.trae/mcp.json"
+        ],
+        "win32": [
+          "%APPDATA%/Trae/User/mcp.json",
+          "%APPDATA%/Trae CN/User/mcp.json",
+          "%USERPROFILE%/.trae/mcp.json"
+        ]
+      },
+      "detectPaths": [
+        "~/.trae",
+        "~/Library/Application Support/Trae",
+        "~/Library/Application Support/Trae CN",
+        "~/.config/Trae",
+        "%APPDATA%/Trae",
+        "%APPDATA%/Trae CN",
+        "/Applications/Trae.app"
+      ],
+      "skillDir": "",
+      "prefer": "node",
+      "note": "合并进 Trae 的 mcp.json（支持国际版与国内版）"
+    },
+    {
+      "id": "windsurf",
+      "label": "Windsurf",
+      "format": "json-mcpServers",
+      "paths": {
+        "darwin": [
+          "~/.codeium/windsurf/mcp_config.json"
+        ],
+        "linux": [
+          "~/.codeium/windsurf/mcp_config.json"
+        ],
+        "win32": [
+          "%USERPROFILE%/.codeium/windsurf/mcp_config.json"
+        ]
+      },
+      "detectPaths": [
+        "~/.codeium/windsurf",
+        "/Applications/Windsurf.app"
+      ],
+      "skillDir": "",
+      "prefer": "node",
+      "note": "合并进 ~/.codeium/windsurf/mcp_config.json 的 mcpServers"
+    },
+    {
+      "id": "kiro",
+      "label": "Kiro",
+      "format": "json-mcpServers",
+      "paths": {
+        "darwin": [
+          "~/.kiro/settings/mcp.json"
+        ],
+        "linux": [
+          "~/.kiro/settings/mcp.json"
+        ],
+        "win32": [
+          "%USERPROFILE%/.kiro/settings/mcp.json"
+        ]
+      },
+      "detectPaths": [
+        "~/.kiro",
+        "/Applications/Kiro.app"
+      ],
+      "skillDir": "",
+      "prefer": "node",
+      "note": "合并进 ~/.kiro/settings/mcp.json 的 mcpServers"
     }
   ]
 }

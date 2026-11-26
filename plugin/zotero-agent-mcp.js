@@ -1,7 +1,7 @@
 /* Zotero-Agent-MCP — core module
  * Loaded as a subscript of bootstrap.js with ctx = { Zotero, rootURI, id, version }.
  * Registers HTTP endpoints on Zotero.Server (127.0.0.1:23119) under /zotero-agent-mcp/,
- * guarded by a bearer token, per-scope switches, library allowlist, rate limit,
+ * guarded by a bearer token, per-scope switches, library allowlist,
  * and an append-only audit log. Also releases the MCP bridge script + config
  * into the Zotero data directory.
  *
@@ -32,14 +32,12 @@ var AgentMCP = new function () {
     "scope-write": true,
     "scope-files": true,
     allowedLibraries: "",
-    rateLimit: 240,
     audit: true,
     autoSync: true,
   };
 
   let registeredEndpoints = [];
   let bridgeReleasedVersion = null;
-  let rl = { windowStart: 0, count: 0 };
   let exportTranslatorCache = new Map();
   // Resolved once the deferred startup maintenance (token reconciliation, file
   // release, audit rotation) has finished. Handlers await it so a request that
@@ -178,18 +176,6 @@ var AgentMCP = new function () {
     let o = {};
     for (let s of all) o[s] = scopeEnabled(s);
     return o;
-  }
-
-  // ---------- rate limiting (fixed window, in-memory) ----------
-  function checkRate() {
-    let max = parseInt(getPref("rateLimit") ?? 240, 10);
-    if (!max || max <= 0) return true;
-    let now = Date.now();
-    if (now - rl.windowStart > 60000) {
-      rl = { windowStart: now, count: 0 };
-    }
-    rl.count++;
-    return rl.count <= max;
   }
 
   // ---------- audit ----------
@@ -1044,6 +1030,7 @@ var AgentMCP = new function () {
     if (format === "json-opencode") return doc.mcp || null;
     // ZCode nests its MCP servers one level deeper: {"mcp": {"servers": {...}}}
     if (format === "json-zcode") return (doc.mcp && doc.mcp.servers) || null;
+    if (format === "json-amp") return doc["amp.mcpServers"] || null;
     return doc.mcpServers || null;
   }
 
@@ -1205,6 +1192,9 @@ var AgentMCP = new function () {
     }
     if (client.format === "json-zcode") {
       return JSON.stringify({ mcp: { servers: { "zotero-agent": entry } } }, null, 2);
+    }
+    if (client.format === "json-amp") {
+      return JSON.stringify({ "amp.mcpServers": { "zotero-agent": entry } }, null, 2);
     }
     return JSON.stringify({ mcpServers: { "zotero-agent": entry } }, null, 2);
   }
@@ -1439,6 +1429,7 @@ var AgentMCP = new function () {
     if (format === "json-vscode-servers") return ["servers"];
     if (format === "json-opencode") return ["mcp"];
     if (format === "json-zcode") return ["mcp", "servers"];
+    if (format === "json-amp") return ["amp.mcpServers"];
     return ["mcpServers"];
   }
 
@@ -1834,9 +1825,6 @@ var AgentMCP = new function () {
       if (!getPref("enabled")) {
         status = 503;
         body = errBody("disabled", "Zotero-Agent-MCP is disabled in Zotero Settings → AgentMCP");
-      } else if (!checkRate()) {
-        status = 429;
-        body = errBody("rate_limited", "Rate limit exceeded (see AgentMCP settings)");
       } else {
         tokenSeen = extractToken(options);
         let real = String(getPref("token") || "");

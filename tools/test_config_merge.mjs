@@ -137,6 +137,16 @@ testJsonFile("zcode", path.join(os.homedir(), ".zcode", "cli", "config.json"), [
   ok("zcode: nested container created", M.isParseableJson(out) && JSON.parse(out).mcp.servers["zotero-agent"]);
 }
 {
+  const empty = '{\n  "amp.updates": "auto"\n}\n';
+  const out = M.jsonCreateEntry(empty, ["amp.mcpServers"], "zotero-agent", entryJson);
+  ok("amp: container created", M.isParseableJson(out) && JSON.parse(out)["amp.mcpServers"]["zotero-agent"]);
+  ok("amp: other keys kept", JSON.parse(out)["amp.updates"] === "auto");
+  const again = M.jsonSetEntry(out, ["amp.mcpServers"], "zotero-agent", entryJson);
+  ok("amp: idempotent", again === out);
+  const removed = M.jsonRemoveEntry(out, ["amp.mcpServers"], "zotero-agent");
+  ok("amp: removal leaves valid JSON", M.isParseableJson(removed) && !JSON.parse(removed)["amp.mcpServers"]["zotero-agent"]);
+}
+{
   // invalid JSON must be refused by the caller's validation
   ok("invalid JSON detected", M.isParseableJson("{ nope") === false);
 }

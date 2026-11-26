@@ -224,6 +224,49 @@ function ok(name, cond, detail) {
       ]),
     JSON.stringify(api.clientPaths(byId["opencode"]))
   );
+  ok(
+    "win32 workbuddy path",
+    api.clientPaths(byId["workbuddy"])[0] === "C:\\Users\\YJY\\.workbuddy\\mcp.json",
+    api.clientPaths(byId["workbuddy"])[0]
+  );
+  ok(
+    "win32 antigravity paths",
+    JSON.stringify(api.clientPaths(byId["antigravity"])) ===
+      JSON.stringify([
+        "C:\\Users\\YJY\\.gemini\\config\\mcp_config.json",
+        "C:\\Users\\YJY\\.gemini\\antigravity\\mcp_config.json",
+      ]),
+    JSON.stringify(api.clientPaths(byId["antigravity"]))
+  );
+  ok(
+    "win32 amp paths",
+    JSON.stringify(api.clientPaths(byId["amp"])) ===
+      JSON.stringify([
+        "C:\\Users\\YJY\\.config\\amp\\settings.json",
+        "C:\\Users\\YJY\\AppData\\Roaming\\amp\\settings.json",
+      ]),
+    JSON.stringify(api.clientPaths(byId["amp"]))
+  );
+  ok(
+    "win32 trae paths",
+    JSON.stringify(api.clientPaths(byId["trae"])) ===
+      JSON.stringify([
+        "C:\\Users\\YJY\\AppData\\Roaming\\Trae\\User\\mcp.json",
+        "C:\\Users\\YJY\\AppData\\Roaming\\Trae CN\\User\\mcp.json",
+        "C:\\Users\\YJY\\.trae\\mcp.json",
+      ]),
+    JSON.stringify(api.clientPaths(byId["trae"]))
+  );
+  ok(
+    "win32 additional agents primary paths",
+    api.clientPaths(byId["copilot-cli"])[0] === "C:\\Users\\YJY\\.copilot\\mcp-config.json" &&
+      api.clientPaths(byId["factory"])[0] === "C:\\Users\\YJY\\.factory\\mcp.json" &&
+      api.clientPaths(byId["kimi-code"])[0] === "C:\\Users\\YJY\\.kimi-code\\mcp.json" &&
+      api.clientPaths(byId["omp"])[0] === "C:\\Users\\YJY\\.omp\\agent\\mcp.json" &&
+      api.clientPaths(byId["commandcode"])[0] === "C:\\Users\\YJY\\.commandcode\\mcp.json" &&
+      api.clientPaths(byId["windsurf"])[0] === "C:\\Users\\YJY\\.codeium\\windsurf\\mcp_config.json" &&
+      api.clientPaths(byId["kiro"])[0] === "C:\\Users\\YJY\\.kiro\\settings\\mcp.json"
+  );
 
   ok("win32 skips Unix /Applications path", api.expandPath("/Applications/Claude.app") === "");
   ok("win32 skips unset env placeholder", api.expandPath("%UNSET_ZAM_VAR%/foo.json") === "");
@@ -255,6 +298,8 @@ function ok(name, cond, detail) {
   const files = new Map([
     ["C:\\Users\\YJY\\.claude.json", '\uFEFF{\n  "numStartups": 5\n}\n'],
     ["C:\\Users\\YJY\\AppData\\Roaming\\Claude\\claude_desktop_config.json", "{}\r\n"],
+    ["C:\\Users\\YJY\\.workbuddy\\mcp.json", '{"mcpServers":{"stata-mcp":{"command":"node"}}}\n'],
+    ["C:\\Users\\YJY\\.config\\amp\\settings.json", '{"amp.updates":"auto"}\n'],
     [
       "C:\\Users\\YJY\\.codex\\config.toml",
       'model = "gpt-5"\r\n\r\n[mcp_servers.zotero-agent]\r\ncommand = "node.exe"\r\nargs = ["x"]\r\n\r\n[mcp_servers.zotero-agent.env]\r\nZOTERO_AGENT_TOKEN = "OLD_TOKEN"\r\n',
@@ -263,6 +308,8 @@ function ok(name, cond, detail) {
   const dirs = new Set([
     "C:\\Users\\YJY\\.claude",
     "C:\\Users\\YJY\\AppData\\Roaming\\Claude",
+    "C:\\Users\\YJY\\.workbuddy",
+    "C:\\Users\\YJY\\.config\\amp",
     "C:\\Users\\YJY\\.codex",
   ]);
   const winFs = createEnv({
@@ -292,6 +339,18 @@ function ok(name, cond, detail) {
   // Claude Desktop
   const wrDesktop = await winFs.api.applyClientConfig(byId["claude-desktop"]);
   ok("win32 claude-desktop write succeeds", wrDesktop.ok === true, wrDesktop.error);
+
+  // WorkBuddy
+  const wrWorkbuddy = await winFs.api.applyClientConfig(byId["workbuddy"]);
+  ok("win32 workbuddy write succeeds", wrWorkbuddy.ok === true, wrWorkbuddy.error);
+  const stWorkbuddy = await winFs.api.clientStatus(byId["workbuddy"]);
+  ok("win32 workbuddy configured & tokenMatch=true", stWorkbuddy.configured && stWorkbuddy.tokenMatch === true);
+
+  // Amp (amp.mcpServers format)
+  const wrAmp = await winFs.api.applyClientConfig(byId["amp"]);
+  ok("win32 amp write succeeds", wrAmp.ok === true, wrAmp.error);
+  const stAmp = await winFs.api.clientStatus(byId["amp"]);
+  ok("win32 amp configured & tokenMatch=true", stAmp.configured && stAmp.tokenMatch === true);
 
   // Codex CRLF + stale token detection + update + fallback move
   const stCodexBefore = await winFs.api.clientStatus(byId["codex"]);

@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.6.2 — 2026-11-26
+
+**面板体验修复 / 20 个 Agent 客户端覆盖 / 移除限流**
+
+### 修复与体验改进
+- 修复设置面板「启用服务」复选框未绑定持久化的 `zotero-agent-mcp.enabled` 偏好导致重新打开面板时取消勾选的 bug。
+- 移除偏好面板顶部的重复 `Zotero-Agent-MCP` 标题（Zotero 设置页标题栏已显示），保留紧凑的版本号、运行状态与接口地址行。
+- 「接入 agent」卡片内置显著的「未在列表中的客户端？手动接入」指引区块，支持一键复制本地 `node` 通用 `mcpServers` JSON、复制 `npx` 配置及同面板展开/收起配置预览。
+- 列表中自动将已安装客户端排在顶部，未安装客户端紧随其后。
+- 移除无必要的本地 HTTP 速率限制（`rateLimit` / `429 rate_limited`）及高级设置中的速率输入框，避免高频批量文献读写误触发限流。
+
+### 客户端覆盖扩展（9 → 20 个）
+- 新增 **Antigravity**、**WorkBuddy**、**GitHub Copilot CLI**、**Factory (Droid)**、**Kimi Code**、**Oh-My-Pi (OMP)**、**CommandCode**、**Amp**（`amp.mcpServers` 格式）、**Trae**（国际版 / 国内版）、**Windsurf**、**Kiro** 的自动检测、配置合并与技能目录映射。
+
 ## 0.6.1 — 2026-11-25
 
 **Windows 路径与客户端接入修复 / CI 与自动发布流水线**
