@@ -4,7 +4,7 @@
 
 # Zotero-Agent-MCP
 
-面向本地 AI Agent 的 Zotero 7–10 全能 MCP 插件与零依赖 stdio 桥接器。在 Zotero 内置 HTTP 服务（`127.0.0.1:23119/zotero-agent-mcp/`）上运行进程内直调接口，提供 **34 个 MCP 工具**、**20 种客户端自动接入**、完整分页遍历与内建路由 Skill，无需绕行原生 `/api/**` 或处理写操作授权弹窗。
+面向本地 AI Agent 的 **Zotero 10** 全能 MCP 插件与零依赖 stdio 桥接器（目前仅支持 Zotero 10）。在 Zotero 内置 HTTP 服务（`127.0.0.1:23119/zotero-agent-mcp/`）上运行进程内直调接口，提供 **34 个 MCP 工具**、**20 种客户端自动接入**、完整分页遍历与内建路由 Skill，无需绕行原生 `/api/**` 或处理写操作授权弹窗。
 
 适用场景：文献全库检索与增量同步、PDF/EPUB 全文分页读取、批注与子笔记提取、批量元数据建库与归类整理、引文样式渲染与条目导出。
 
@@ -44,6 +44,8 @@
 
 ## 安装与初始化
 
+> **环境要求**：目前插件仅在 **Zotero 10** 下可用，且需先在 Zotero 高级设置中开启本地 HTTP 通讯授权（步骤 2）。
+
 ### 1. 安装 Zotero 插件
 
 从 [GitHub Releases](https://github.com/JingYangYuan/zotero-agent-mcp/releases/tag/release) 下载最新版 `zotero-agent-mcp.xpi`，或从源码本地打包：
@@ -56,7 +58,15 @@ bash tools/build.sh
 
 在 Zotero 中依次打开 **工具 → 插件 → 齿轮图标 → Install Plugin From File…**，选择 `build/zotero-agent-mcp.xpi` 安装。插件通过 `update.json` 自动检查后续版本更新。
 
-### 2. 启动方式与工具集档位
+### 2. 开启 Zotero 本地通讯授权（必做）
+
+安装完成后，打开 **Zotero → 设置 → 高级 → 杂项**，勾选 **「允许此计算机上的其他应用程序与 Zotero 通讯」**（开启后 `http://localhost:23119/api/` 端口服务才会监听，插件路由与 MCP 桥接才能正常连接）：
+
+<p align="center">
+  <img src="docs/zotero-allow-communication.png" alt="Zotero 高级设置中开启允许此计算机上的其他应用程序与 Zotero 通讯" width="760">
+</p>
+
+### 3. 启动方式与工具集档位
 
 桥接脚本随插件启动自动释放至 `<Zotero 数据目录>/zotero-agent-mcp/zotero-agent-mcp.mjs`，也可直接通过 `npx` 启动：
 
@@ -66,7 +76,7 @@ bash tools/build.sh
 | `npx` 零配置拉起 | `npx --prefer-offline -y zotero-agent-mcp --token <令牌>` | 沙盒客户端或不想绑定本机路径时；未传 `--token` 时自动回退读取数据目录下的 `token` 文件 |
 | 精简核心工具集 | 在参数追加 `--tools=core`（或设置 `ZOTERO_AGENT_TOOLS=core`） | 仅暴露 13 个高频核心工具，用于严控上下文预算的客户端 |
 
-### 3. 直接 HTTP 调用示例
+### 4. 直接 HTTP 调用示例
 
 ```bash
 curl http://127.0.0.1:23119/zotero-agent-mcp/ping
@@ -160,8 +170,8 @@ ZOTERO_AGENT_TOKEN="$TOKEN" CREATE_ITEM_TEST=1 MANAGE_TEST=1 node tools/test_bri
 
 ## 故障排查
 
-- **提示插件不兼容或文件损坏**：确认从 [Releases](https://github.com/JingYangYuan/zotero-agent-mcp/releases/tag/release) 下载完整 `.xpi` 安装，且 `manifest.json` 的 `update_url` 与 `strict_max_version`（`10.*`）未被篡改。
-- **Agent 连不上本地服务**：打开面板点击「连接测试」；常见问题包括 Zotero 未开启、令牌过期未同步、客户端使用旧路径或本机未安装 Node.js（≥ 18）。
+- **提示插件不兼容或文件损坏**：确认使用的是 **Zotero 10**，并从 [Releases](https://github.com/JingYangYuan/zotero-agent-mcp/releases/tag/release) 下载完整 `.xpi` 安装，且 `manifest.json` 的 `update_url` 与 `strict_max_version`（`10.*`）未被篡改。
+- **Agent 连不上本地服务**：先到 **Zotero → 设置 → 高级 → 杂项** 确认已勾选 **「允许此计算机上的其他应用程序与 Zotero 通讯」**，再打开插件面板点击「连接测试」；常见问题还包括 Zotero 未开启、令牌过期未同步、客户端使用旧路径或本机未安装 Node.js（≥ 18）。
 - **工具返回 `401 unauthorized` 或 `403 scope_disabled`**：重新触发「全部接入」或「更新」同步新令牌；`403` 请到面板「高级设置」打开对应作用域（如 `write` / `fulltext`）。
 - **只看到 13 个工具**：当前客户端启动参数带了 `--tools=core`，移除该参数即可恢复全部 34 个工具。
 - **`npx` 拉起缓慢或失败**：优先使用面板默认写入的本地 `node` 直启配置；Windows 用户注意不要跨缓存代理盲目重试，确认使用 `npx --prefer-offline -y zotero-agent-mcp`。
@@ -174,7 +184,8 @@ zotero-agent-mcp/
 ├── bridge/
 │   └── zotero-agent-mcp.mjs     # 零依赖 Node MCP stdio 桥接器（34 工具）
 ├── docs/
-│   └── banner.svg               # 仓库视觉横幅
+│   ├── banner.svg               # 仓库视觉横幅
+│   └── zotero-allow-communication.png  # Zotero 本地通讯授权设置截图
 ├── plugin/
 │   ├── manifest.json            # Zotero 插件清单与自动更新入口
 │   ├── bootstrap.js             # 插件生命周期钩子

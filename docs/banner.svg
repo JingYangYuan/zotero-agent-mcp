@@ -46,7 +46,7 @@
     <path d="M0 70h1280M0 140h1280M0 210h1280M0 280h1280M0 350h1280"/>
   </g>
 
-  <text x="88" y="88" fill="#7dd3fc" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif" font-size="15" font-weight="700" letter-spacing="4">ZOTERO 7–10 PLUGIN · ZERO-DEP MCP BRIDGE</text>
+  <text x="88" y="88" fill="#7dd3fc" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif" font-size="15" font-weight="700" letter-spacing="4">ZOTERO 10 PLUGIN · ZERO-DEP MCP BRIDGE</text>
   <text x="88" y="166" fill="#f8fafc" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif" font-size="50" font-weight="800">zotero<tspan fill="url(#title-grad)">-agent-mcp</tspan></text>
   <text x="88" y="216" fill="#cbd5e1" font-family="ui-sans-serif, system-ui, PingFang SC, Microsoft YaHei, sans-serif" font-size="21">本地 AI Agent 读写 Zotero · 进程内 API · 自动配置接入</text>
 
@@ -113,7 +113,7 @@
 
     <g transform="translate(24 292)" font-family="ui-sans-serif, system-ui, -apple-system, sans-serif" font-size="12">
       <text fill="#64748b" font-weight="500">适配：</text>
-      <text x="42" fill="#cbd5e1" font-weight="600">Zotero 7–10 · Win / macOS / Linux · node / npx</text>
+      <text x="42" fill="#cbd5e1" font-weight="600">Zotero 10 · Win / macOS / Linux · node / npx</text>
     </g>
   </g>
 </svg>
